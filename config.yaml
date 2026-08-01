@@ -13,12 +13,40 @@ go2rtc:
   streams:
     dvor:
       - rtsp://10.0.0.7:554/user=admin_password=k1nno6g2_channel=0_stream=0&onvif=0.sdp?real_stream
+    vorota:
+      - rtsp://10.0.0.12:554/user=admin_password=tlJwpbo6_channel=0_stream=0&onvif=0.sdp?real_stream
 
 cameras:
   dvor:
     ffmpeg:
       inputs:
         - path: rtsp://127.0.0.1:8554/dvor
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      enabled: true
+    objects:
+      track:
+        - person
+    record:
+      enabled: true
+      continuous:
+        days: 7
+      alerts:
+        retain:
+          days: 30
+    snapshots:
+      enabled: true
+      retain:
+        default: 30
+    motion:
+      threshold: 43
+      contour_area: 45
+      improve_contrast: true
+  vorota:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/vorota
           input_args: preset-rtsp-restream
           roles: [detect, record]
     detect:
