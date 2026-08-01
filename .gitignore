@@ -1,0 +1,10 @@
+# Runtime databases и служебные файлы Frigate — не версионируем
+*.db
+*.db-shm
+*.db-wal
+.jwt_secret
+.exports
+.timeline
+.search_stats.json
+.vacuum
+model_cache/
