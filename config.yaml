@@ -12,7 +12,7 @@ face_recognition:
 go2rtc:
   streams:
     dvor:
-      - rtsp://good:bbbbbbb7@10.0.0.7:554/channel=1&stream=0.sdp
+      - rtsp://10.0.0.7:554/user=admin_password=k1nno6g2_channel=0_stream=0&onvif=0.sdp?real_stream
 
 cameras:
   dvor:
