@@ -72,13 +72,15 @@ cameras:
   axis_2100:
     ffmpeg:
       inputs:
-        - path: http://10.0.0.49/axis-cgi/mjpg/video.cgi
+        - path: http://ahuser:bbbbbbb7@10.0.0.49/axis-cgi/mjpg/video.cgi
           input_args: -f mjpeg
           roles: [detect]
+      output_args:
+        detect: -threads 2 -vf transpose=2 -f rawvideo -pix_fmt yuv420p
     detect:
       enabled: true
-      width: 640
-      height: 480
+      width: 480
+      height: 640
       fps: 2
     objects:
       track:
