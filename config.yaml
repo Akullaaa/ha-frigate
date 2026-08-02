@@ -72,7 +72,7 @@ cameras:
   axis_2100:
     ffmpeg:
       inputs:
-        - path: http://ahuser:bbbbbbb7@10.0.0.49/axis-cgi/mjpg/video.cgi
+        - path: http://ahuserview:bbbbbbb7@10.0.0.49/axis-cgi/mjpg/video.cgi
           input_args: -f mjpeg
           roles: [detect]
       output_args:
