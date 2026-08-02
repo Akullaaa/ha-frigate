@@ -69,6 +69,26 @@ cameras:
       threshold: 43
       contour_area: 45
       improve_contrast: true
+  axis_2100:
+    ffmpeg:
+      inputs:
+        - path: http://10.0.0.49/axis-cgi/mjpg/video.cgi
+          input_args: -f mjpeg
+          roles: [detect]
+    detect:
+      enabled: true
+      width: 640
+      height: 480
+      fps: 2
+    objects:
+      track:
+        - person
+    record:
+      enabled: false
+    snapshots:
+      enabled: true
+      retain:
+        default: 30
 
 version: 0.17-0
 semantic_search:
