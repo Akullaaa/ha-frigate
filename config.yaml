@@ -14,7 +14,7 @@ go2rtc:
     dvor:
       - rtsp://10.0.0.7:554/user=admin_password=k1nno6g2_channel=0_stream=0&onvif=0.sdp?real_stream
     vorota:
-      - rtsp://10.0.0.12:554/user=admin_password=tlJwpbo6_channel=0_stream=0&onvif=0.sdp?real_stream
+      - rtsp://10.0.0.12:554/user=cjmn_password=I8DaXS5b_channel=0_stream=0&onvif=0.sdp?real_stream
     tambur:
       - rtsp://admin:bbbbbbb7@192.168.77.120/main
 
