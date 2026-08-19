@@ -16,19 +16,21 @@
 # 12fps (было под 25fps).
 #
 # Три стадии конвейера:
-#   ffmpeg (decode + scale_vaapi, GPU) | xonix_compositor.py (копирование
-#   квадратика тем же кадром, CPU — единственный кусок без GPU-пути) |
-#   ffmpeg (h264_vaapi, GPU → RTSP push)
+#   ffmpeg (decode + scale_vaapi, GPU) | компоузер на numpy (CPU — единственный
+#   кусок без GPU-пути) | ffmpeg (h264_vaapi, GPU → RTSP push)
+# Третий параметр — какой компоузер использовать (по умолчанию xonix_compositor.py,
+# "квадратик"; xonix_compositor_resize.py — "миниатюра", см. project_xonix).
 # Заведён как go2rtc exec-источник — см. go2rtc.streams в config.yaml.
 set -e
 FF=/usr/lib/ffmpeg/7.0/bin/ffmpeg
 CAM="$1"
 OUT="$2"
+COMPOSITOR="${3:-/config/xonix_compositor.py}"
 
 "$FF" -nostdin -loglevel warning -vaapi_device /dev/dri/renderD128 \
     -rtsp_transport tcp -i "rtsp://127.0.0.1:8554/${CAM}_sub" \
     -vf format=nv12,hwupload,scale_vaapi=960:540,hwdownload,format=nv12,format=bgr24 -f rawvideo - \
-  | python3 /config/xonix_compositor.py \
+  | python3 "$COMPOSITOR" \
   | "$FF" -nostdin -loglevel warning -vaapi_device /dev/dri/renderD128 \
       -f rawvideo -pix_fmt bgr24 -video_size 960x540 -framerate 12 -i - \
       -vf format=nv12,hwupload -c:v h264_vaapi -qp 20 -bf 0 -g 24 -keyint_min 24 -an \
