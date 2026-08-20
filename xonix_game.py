@@ -466,9 +466,10 @@ def _get_hud_font(size: int) -> ImageFont.FreeTypeFont | None:
 
 def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
     """Основная строка (кто именно играет + процент + победы) плюс, если
-    это бот на LLM-стратеге, вторая строка со статистикой токенов
-    последнего запроса — по прямому запросу пользователя ("покажи больше
-    информации... какой именно ИИ работает и его статистику по токенам")."""
+    это бот на LLM-стратеге, статистика последнего запроса — КАЖДОЕ
+    значение отдельной строкой ("столбик", не всё в одну строку через
+    запятые — по прямому запросу пользователя, раньше было плотной
+    единой строкой)."""
     name = "Голубой" if player == "p1" else "Жёлтый"
     if mqtt_state.is_human(player):
         who = "человек"
@@ -482,14 +483,13 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
     if not mqtt_state.is_human(player) and provider != "off":
         usage = mqtt_state.llm_usage[player]
         if usage:
+            lines.append(f"    вход: {usage.get('input', '?')} токенов")
+            lines.append(f"    выход: {usage.get('output', '?')} токенов")
             cached = usage.get("cached", 0)
-            cache_part = f", кэш {cached}" if cached else ""
-            cost = usage.get("cost_cents", 0.0)
-            total_cost = usage.get("total_cost_cents", 0.0)
-            lines.append(
-                f"    {usage.get('input', '?')}/{usage.get('output', '?')} токенов{cache_part}"
-                f" · {cost:.4f}¢ (всего {total_cost:.4f}¢)"
-            )
+            if cached:
+                lines.append(f"    кэш: {cached} токенов")
+            lines.append(f"    цена: {usage.get('cost_cents', 0.0):.4f}¢")
+            lines.append(f"    всего: {usage.get('total_cost_cents', 0.0):.4f}¢")
         else:
             status = mqtt_state.llm_status[player] or "жду первый ответ…"
             lines.append(f"    {status}")
