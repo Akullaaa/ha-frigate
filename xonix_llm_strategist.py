@@ -64,6 +64,65 @@ MQTT_PASS = "qqqqqqq7"
 DECIDE_INTERVAL = 20.0  # секунд между обращениями к LLM — не на каждый тик
 STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольше — движка нет, выходим
 
+# Цены USD за 1M токенов — тот же формат/источник, что и openAiCustomModelInfo
+# у Roo Code для Kimi (см. алёна.md, раздел про Moonshot-прокси: вход 1.67,
+# выход 8.33, чтение кэша 0.28 — курс уже заложен в исходных ¥/1M). Haiku 4.5
+# подтверждён через skill claude-api (2026-08-21): $1.00/$5.00 за 1M,
+# cache_read — стандартные ~0.1x входной цены (Anthropic), на практике не
+# используется — кэш для Haiku тут всегда 0 (см. project_xonix_game.md).
+PRICING_USD_PER_1M = {
+    "haiku": {"input": 1.00, "output": 5.00, "cache_read": 0.10},
+    "kimi": {"input": 1.67, "output": 8.33, "cache_read": 0.28},
+}
+
+COST_FILE = "/config/xonix_llm_cost.json"
+
+
+def compute_cost_cents(provider: str, usage: dict) -> float:
+    """Цена ОДНОГО запроса в центах — "как в Roo Code" (там тоже считают
+    по USD/1M токенов из openAiCustomModelInfo). У Kimi input ВКЛЮЧАЕТ
+    закешированные токены (OpenAI-стиль учёта, cached — подмножество input,
+    не платить дважды), у Anthropic input УЖЕ БЕЗ кэша (отдельный счётчик
+    cache_read) — эта асимметрия учтена явно, не единая формула на оба."""
+    prices = PRICING_USD_PER_1M.get(provider)
+    if not prices:
+        return 0.0
+    input_tok = usage.get("input", 0) or 0
+    output_tok = usage.get("output", 0) or 0
+    cached_tok = usage.get("cached", 0) or 0
+    fresh_input = max(0, input_tok - cached_tok) if provider == "kimi" else input_tok
+    usd = (
+        fresh_input / 1_000_000 * prices["input"]
+        + cached_tok / 1_000_000 * prices["cache_read"]
+        + output_tok / 1_000_000 * prices["output"]
+    )
+    return usd * 100
+
+
+def load_total_cost() -> dict:
+    try:
+        with open(COST_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: float(v) for k, v in data.items()}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+
+
+def add_cost(consumer: str, cents: float) -> float:
+    """Копит расход по потребителю (p1/p2/alena) в файле, переживающем
+    рестарты — как и xonix_wins.json. Три процесса (p1/p2-стратеги +
+    xonix_chat_alena.py) пишут в один файл без блокировки — гонка теоретически
+    возможна (вызовы редкие, раз в ~8-20с, цена ошибки — потерянное
+    обновление в статистике, не деньги), файловый лок ради этого не заводим."""
+    data = load_total_cost()
+    data[consumer] = data.get(consumer, 0.0) + cents
+    try:
+        with open(COST_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass
+    return data[consumer]
+
 ANTHROPIC_KEY_PATH = "/config/device_credentials/anthropic_api_key.txt"
 MOONSHOT_KEY_PATH = "/config/device_credentials/moonshot_api_key.txt"
 
@@ -361,6 +420,15 @@ def main() -> None:
                             qos=0, retain=True,
                         )
                         client.publish(f"xonix/game/{player}/llm_status", "ok", qos=0, retain=True)
+                        # Цена этого конкретного запроса в центах — "как в Roo Code"
+                        # (USD/1M из PRICING_USD_PER_1M) — плюс накопленный итог по
+                        # этому игроку, переживающий рестарты (add_cost). Кладём прямо
+                        # в usage, чтобы разошлось со всеми тремя публикациями ниже
+                        # (llm_usage-топик, приватное и общее сообщения чата) одним куском.
+                        cost_cents = compute_cost_cents(provider, usage)
+                        total_cents = add_cost(player, cost_cents)
+                        usage["cost_cents"] = round(cost_cents, 4)
+                        usage["total_cost_cents"] = round(total_cents, 4)
                         # Цена этого конкретного запроса — отдельным ретейн-топиком
                         # (видно и без прокрутки чата) И прикреплена к самому приватному
                         # сообщению (usage), чтобы отображалась прямо рядом с репликой,

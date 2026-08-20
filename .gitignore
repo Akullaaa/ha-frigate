@@ -16,3 +16,4 @@ go2rtc-tv-bin
 # runtime-состояние выше
 xonix_chat_history.json
 xonix_wins.json
+xonix_llm_cost.json

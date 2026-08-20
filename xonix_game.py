@@ -484,7 +484,12 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
         if usage:
             cached = usage.get("cached", 0)
             cache_part = f", кэш {cached}" if cached else ""
-            lines.append(f"    {usage.get('input', '?')}/{usage.get('output', '?')} токенов{cache_part}")
+            cost = usage.get("cost_cents", 0.0)
+            total_cost = usage.get("total_cost_cents", 0.0)
+            lines.append(
+                f"    {usage.get('input', '?')}/{usage.get('output', '?')} токенов{cache_part}"
+                f" · {cost:.4f}¢ (всего {total_cost:.4f}¢)"
+            )
         else:
             status = mqtt_state.llm_status[player] or "жду первый ответ…"
             lines.append(f"    {status}")

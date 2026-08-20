@@ -30,7 +30,15 @@ import urllib.error
 
 import paho.mqtt.client as mqtt
 
-from xonix_llm_strategist import ANTHROPIC_KEY_PATH, MOONSHOT_KEY_PATH, call_claude_haiku, call_kimi, read_key
+from xonix_llm_strategist import (
+    ANTHROPIC_KEY_PATH,
+    MOONSHOT_KEY_PATH,
+    add_cost,
+    call_claude_haiku,
+    call_kimi,
+    compute_cost_cents,
+    read_key,
+)
 
 MQTT_HOST = "core-mosquitto"
 MQTT_PORT = 1883
@@ -176,6 +184,10 @@ def main() -> None:
                         raise RuntimeError("no moonshot key")
                     text, usage = call_kimi(moonshot_key, SYSTEM_PROMPT, user_prompt)
                 text = text.strip()
+                cost_cents = compute_cost_cents(provider, usage)
+                total_cents = add_cost("alena", cost_cents)
+                usage["cost_cents"] = round(cost_cents, 4)
+                usage["total_cost_cents"] = round(total_cents, 4)
                 if text:
                     client.publish(
                         "xonix/chat/post/user",
