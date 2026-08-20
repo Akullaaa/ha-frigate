@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Третий, самый медленный уровень управления ботом — НЕ решает ходы (это
-делает xonix_ai_agent.py каждые 0.25с), а раз в DECIDE_INTERVAL секунд
-спрашивает настоящую LLM "как в целом сейчас играть" и публикует:
+делает xonix_ai_agent.py каждые 0.25с), а раз в DECIDE_INTERVAL_BY_PLAYER[player]
+секунд (свой интервал на игрока, не общий) спрашивает настоящую LLM "как в
+целом сейчас играть" и публикует:
 - числовые веса (aggression/caution) — как и раньше, подмешиваются в оценку
   хода эвристики;
 - order (expand/raid/defend/regroup) — НАСТОЯЩИЙ новый канал управления:
@@ -16,8 +17,8 @@
   плюс отдельный ретейн-топик xonix/game/p{N}/llm_usage — тот же снимок
   без прокрутки чата;
 - general_message — необязательная реплика в ОБЩИЙ чат (пользователь + оба
-  LLM-стратега), пусто, если сказать нечего — не спамим партию раз в
-  DECIDE_INTERVAL секунд.
+  LLM-стратега), пусто, если сказать нечего — не спамим партию раз в свой
+  интервал (см. DECIDE_INTERVAL_BY_PLAYER).
 
 Текст-"характер" бота (xonix/game/p{N}/persona, редактируется с дашборда —
 mqtt: text:) передаётся LLM как есть при каждом вызове, плюс свежий срез
@@ -62,14 +63,17 @@ MQTT_PORT = 1883
 MQTT_USER = "frigateu"
 MQTT_PASS = "qqqqqqq7"
 
-DECIDE_INTERVAL = 120.0  # секунд между обращениями к LLM — не на каждый тик.
-# Было 20с, потом 30с — теперь 120с (раз в 2 минуты), по прямому запросу
-# пользователя (2026-08-21) ради перехода на kimi-k3: сам k3 дороже за
-# токен в 3-3.75 раза, чем k2.7-code, И на думать раз в 2 минуты нам
-# столько точности не нужно — компенсируем более редкими вызовами, а не
-# отказом от модели. Заодно снимает и риск таймаута (см. call_kimi):
-# k3 на think_effort=low вживую отвечал 26-41с, что не укладывалось бы
-# в частые опросы каждые 20-30с.
+# Интервал между обращениями к LLM — раздельный по игроку, не общий на
+# оба процесса (этот файл запускается дважды, с player="p1"/"p2").
+# p1 (Голубой, Haiku) — интервал НЕ трогать, оставлен как был (по прямому
+# запросу пользователя 2026-08-21: "Голубого оставь со своим интервалом
+# проверки"), это прошлое значение 20с->30с ради экономии на Haiku.
+# p2 (Жёлтый, kimi-k3) — 120с (раз в 2 минуты): k3 дороже за токен в
+# 3-3.75 раза, чем k2.7-code, и вживую отвечает 26-41с даже на
+# think_effort=low (реасонинг гуляет 59-961 токенов) — компенсируем
+# редкими вызовами вместо отказа от модели, а не частым 15с-таймаутом
+# (см. call_kimi — там же поднят HTTP-таймаут 15с->60с).
+DECIDE_INTERVAL_BY_PLAYER = {"p1": 30.0, "p2": 120.0}
 STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольше — движка нет, выходим
 
 # Цены USD за 1M токенов. Haiku 4.5 подтверждён через skill claude-api
@@ -80,8 +84,15 @@ STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольш�
 # вход при промахе кэша $3.00, вход при попадании в кэш $0.30, выход $15.00.
 # k2.7-code (использовался до 2026-08-21) был дешевле за токен, но k3
 # выбран пользователем осознанно — компенсация ценой сделана через
-# DECIDE_INTERVAL=120с выше, а не через цены (это просто их актуальное
-# значение для расчёта cost_cents, не рычаг экономии).
+# DECIDE_INTERVAL_BY_PLAYER["p2"]=120с выше, а не через цены (это просто
+# их актуальное значение для расчёта cost_cents, не рычаг экономии).
+# Единый источник имени модели — HUD (xonix_game.py) публикует это в
+# xonix/game/p{N}/llm_model, чтобы показывать реальную модель, а не
+# просто название провайдера (по прямому запросу пользователя 2026-08-21:
+# "показывать... какая именно сейчас модель работает", не название
+# профиля/провайдера).
+MODEL_BY_PROVIDER = {"haiku": "claude-haiku-4-5", "kimi": "kimi-k3"}
+
 PRICING_USD_PER_1M = {
     "haiku": {"input": 1.00, "output": 5.00, "cache_read": 0.10},
     "kimi": {"input": 3.00, "output": 15.00, "cache_read": 0.30},
@@ -223,7 +234,7 @@ def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> tup
     # если промпт когда-нибудь вырастет — специально раздувать его ради
     # кэша сейчас не имеет смысла, экономия не окупит закладку токенов.
     body = json.dumps({
-        "model": "claude-haiku-4-5",
+        "model": MODEL_BY_PROVIDER["haiku"],
         "max_tokens": 500,
         "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         "messages": [{"role": "user", "content": user_prompt}],
@@ -251,7 +262,7 @@ def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> tup
 
 
 def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> tuple[str, dict]:
-    model = "kimi-k3"
+    model = MODEL_BY_PROVIDER["kimi"]
     body = json.dumps({
         "model": model,
         "temperature": 1,  # эта модель принимает только 1, см. алёна.md
@@ -275,8 +286,9 @@ def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> tuple[str, 
     # k3 даже на think_effort=low вживую отвечал 26-41с (замерено 2026-08-21,
     # 4 живых прогона: только 1 из 4 уложился в единицы секунд, у остальных
     # 800-960 reasoning-токенов и десятки секунд) — прежние 15с постоянно
-    # рубили бы вызов по таймауту. Раз DECIDE_INTERVAL теперь 120с (см. ниже),
-    # можем себе позволить широкий запас без риска для частоты вызовов.
+    # рубили бы вызов по таймауту. Раз у p2 (kimi) интервал теперь 120с
+    # (DECIDE_INTERVAL_BY_PLAYER), можем себе позволить широкий запас без
+    # риска для частоты вызовов.
     with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.loads(resp.read())
     text = data["choices"][0]["message"]["content"]
@@ -367,6 +379,7 @@ def main() -> None:
     parser.add_argument("player", choices=["p1", "p2"])
     args = parser.parse_args()
     player = args.player
+    decide_interval = DECIDE_INTERVAL_BY_PLAYER[player]
 
     shared = Shared()
 
@@ -414,8 +427,8 @@ def main() -> None:
 
     # Ретейн, раз при старте — чтобы HUD (xonix_game.py) мог показать
     # реальный интервал опроса LLM, не хардкодить то же число во втором
-    # файле (см. project_xonix_game.md про DECIDE_INTERVAL=30 вместо 20).
-    client.publish(f"xonix/game/{player}/llm_interval", str(DECIDE_INTERVAL), qos=0, retain=True)
+    # файле (см. project_xonix_game.md; интервал теперь раздельный по игроку).
+    client.publish(f"xonix/game/{player}/llm_interval", str(decide_interval), qos=0, retain=True)
 
     anthropic_key = read_key(ANTHROPIC_KEY_PATH)
     moonshot_key = read_key(MOONSHOT_KEY_PATH)
@@ -474,6 +487,10 @@ def main() -> None:
                         advantage = compute_advantage_cents(player, total_cents)
                         if advantage is not None:
                             usage["advantage_cents"] = round(advantage, 4)
+                        # Реальная модель, а не просто название провайдера — по
+                        # прямому запросу пользователя ("какая именно сейчас
+                        # модель работает", не "профиль"). Едет тем же куском usage.
+                        usage["model"] = MODEL_BY_PROVIDER.get(provider, provider)
                         # Цена этого конкретного запроса — отдельным ретейн-топиком
                         # (видно и без прокрутки чата) И прикреплена к самому приватному
                         # сообщению (usage), чтобы отображалась прямо рядом с репликой,
@@ -507,7 +524,7 @@ def main() -> None:
             except Exception as e:  # не даём случайной ошибке парсинга убить процесс
                 client.publish(f"xonix/game/{player}/llm_status", f"неожиданная ошибка: {e}", qos=0, retain=True)
 
-        dt = DECIDE_INTERVAL - (time.monotonic() - t0)
+        dt = decide_interval - (time.monotonic() - t0)
         if dt > 0:
             time.sleep(dt)
 

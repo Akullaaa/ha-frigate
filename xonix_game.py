@@ -474,19 +474,31 @@ def _get_hud_font(size: int) -> ImageFont.FreeTypeFont | None:
 
 
 def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
-    """Основная строка (кто именно играет + процент + победы) плюс, если
-    это бот на LLM-стратеге, статистика последнего запроса — КАЖДОЕ
-    значение отдельной строкой ("столбик", не всё в одну строку через
-    запятые — по прямому запросу пользователя, раньше было плотной
-    единой строкой)."""
+    """Заголовок — только имя игрока, ВСЁ остальное (кто играет, процент
+    территории, победы, статистика LLM) — каждое значение отдельной
+    строкой ("столбик", по прямому запросу пользователя: раньше и это, и
+    статистика ниже были смешаны/сжаты в одну строку через запятые)."""
     name = "Голубой" if player == "p1" else "Жёлтый"
     if mqtt_state.is_human(player):
         who = "человек"
     else:
         strat = "умный" if mqtt_state.strategy[player] == "smart" else "простой"
         provider = mqtt_state.llm_provider[player]
-        who = f"бот: {strat}" if provider == "off" else f"бот: {strat}+{provider.capitalize()}"
-    lines = [f"{name} ({who}) {field.percent(player):.1f}%  побед: {wins[player]}"]
+        if provider == "off":
+            who = f"бот: {strat}"
+        else:
+            # Реальная модель из последнего вызова (usage["model"]), а не
+            # просто название провайдера — по прямому запросу пользователя
+            # ("какая именно сейчас модель работает"). Пока первый вызов ещё
+            # не пришёл — временно название провайдера, не пусто.
+            model = mqtt_state.llm_usage[player].get("model", provider.capitalize())
+            who = f"бот: {strat}+{model}"
+    lines = [
+        name,
+        f"    {who}",
+        f"    территория: {field.percent(player):.1f}%",
+        f"    побед: {wins[player]}",
+    ]
 
     provider = mqtt_state.llm_provider[player]
     if not mqtt_state.is_human(player) and provider != "off":
