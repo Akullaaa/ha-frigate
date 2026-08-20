@@ -22,6 +22,12 @@
 # xonix_llm_strategist.py просто не видит чат (подписан на топики chat/log/*,
 # которые пишет только хаб) — молча работает без контекста чата, не падает.
 #
+# Плюс xonix_chat_alena.py — фоновая версия Алёны в общем чате: реагирует
+# ТОЛЬКО на сообщения человека (не на ботов), provider=off по умолчанию.
+# Отдельно от самой сессии Claude Code, которая пишет в чат вручную только
+# пока пользователь реально разговаривает в терминале — этот процесс
+# отвечает сам, без необходимости открывать Claude Code.
+#
 # Заведён как go2rtc exec-источник — см. go2rtc.streams.xonix_game в
 # config.yaml.
 set -e
@@ -38,9 +44,11 @@ python3 /config/xonix_llm_strategist.py p2 &
 LLM_P2=$!
 python3 /config/xonix_chat_hub.py &
 CHAT_HUB=$!
+python3 /config/xonix_chat_alena.py &
+CHAT_ALENA=$!
 
 cleanup() {
-  kill "$AGENT_P1" "$AGENT_P2" "$LLM_P1" "$LLM_P2" "$CHAT_HUB" 2>/dev/null || true
+  kill "$AGENT_P1" "$AGENT_P2" "$LLM_P1" "$LLM_P2" "$CHAT_HUB" "$CHAT_ALENA" 2>/dev/null || true
 }
 trap cleanup EXIT
 
