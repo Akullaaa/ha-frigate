@@ -1,15 +1,34 @@
 #!/usr/bin/env python3
-"""Ксоникс-игра: два раздельных поля (сплит-экран), у каждого игрока своя
-захватываемая территория. Незанятая часть поля — общая фоновая камера
-(dvor). Занятая территория игрока 1 открывает камеру vorota, игрока 2 —
-камеру tambur. Управление — через MQTT (см. project memory
+"""Ксоникс-игра: ОДНО общее поле на двоих (не два раздельных, как в первой
+версии) — игроки отнимают территорию у одного нейтрального пула и
+соревнуются, кто первым дотянет до порога (порог зависит от сложности,
+см. DIFFICULTY_PRESETS, переключается с дашборда через MQTT). Незанятая
+часть поля — общая фоновая камера (dvor). Территория игрока 1 открывает
+камеру vorota, игрока 2 — камеру tambur, обе теперь декодируются в
+ПОЛНОМ размере холста (не в половину, как раньше), потому что владение
+клетками больше не привязано к фиксированной половине экрана.
+
+Можно наступить на след соперника — тогда гибнет ОН (его след стирается),
+а не вы; на его уже занятую территорию — она непроходима как стена
+(не отбирается автоматически, только через захват нейтральной земли).
+
+Управление — через MQTT (см. project memory
 project_xonix_cameras_composite.md и обсуждение архитектуры в чате:
-топики xonix/game/p{1,2}/move, p{1,2}/mode, control, state).
+топики xonix/game/p{1,2}/move, p{1,2}/mode, control, difficulty, state).
 
 По умолчанию ОБА игрока — боты (attract mode): партия идёт вечно сама с
 собой, человек перехватывает управление в любой момент простым нажатием
 направления на дашборде ХА — движок сам видит свежий вход и на несколько
 секунд (IDLE_TIMEOUT) отдаёт кубик человеку, потом тихо возвращает боту.
+
+ВАЖНО: у самого движка НЕТ встроенной стратегии ИИ (была в первой версии,
+убрана). "Бот" — это ОТДЕЛЬНЫЙ процесс xonix_ai_agent.py, подключающийся
+по MQTT точно так же, как человек: читает состояние поля из
+xonix/game/board и публикует направление в xonix/game/p{1,2}/ai_move —
+свой канал, отдельный от p{1,2}/move (туда пишет только дашборд/человек),
+чтобы движок мог выбирать между ними по той же логике auto/ai/human, не
+путая, кто сейчас реально ведёт. Движок только публикует богатое
+состояние и слушает оба канала — он ничего не решает сам.
 
 Камеры декодируются через уже открытые go2rtc-потоки (localhost-рестрим,
 те же, что у Frigate detect/record) — ровно одно физическое подключение на
@@ -34,10 +53,9 @@ import paho.mqtt.client as mqtt
 
 FF = "/usr/lib/ffmpeg/7.0/bin/ffmpeg"
 CANVAS_W, CANVAS_H = 960, 540
-HALF_W = CANVAS_W // 2
 FPS = 12
 CELL = 12
-GRID_W = HALF_W // CELL   # 40
+GRID_W = CANVAS_W // CELL  # 80
 GRID_H = CANVAS_H // CELL  # 45
 
 MQTT_HOST = "core-mosquitto"
@@ -46,12 +64,19 @@ MQTT_USER = "frigateu"
 MQTT_PASS = "qqqqqqq7"
 
 IDLE_TIMEOUT = 8.0
-NUM_BALLS = 3
-BALL_SPEED_MIN, BALL_SPEED_MAX = 0.12, 0.22
-TARGET_PERCENT = 75.0
 MAX_RAID_LEN = 30  # клеток следа, после которых бот начинает возвращаться, даже не дойдя до цели
+BASE_SIZE = 6  # размер стартовой базы каждого игрока, клеток
 
-EMPTY, TERRITORY, TRAIL = 0, 1, 2
+DIFFICULTY_PRESETS = {
+    "easy":   {"target_percent": 30, "num_balls": 4, "speed": (0.10, 0.16)},
+    "normal": {"target_percent": 45, "num_balls": 6, "speed": (0.12, 0.20)},
+    "hard":   {"target_percent": 60, "num_balls": 9, "speed": (0.16, 0.26)},
+}
+
+EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
+TERRITORY_OF = {"p1": P1_TERRITORY, "p2": P2_TERRITORY}
+TRAIL_OF = {"p1": P1_TRAIL, "p2": P2_TRAIL}
+OPPONENT = {"p1": "p2", "p2": "p1"}
 
 DIRS = {
     "up": (0, -1),
@@ -62,37 +87,38 @@ DIRS = {
 OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 # --- камеры -----------------------------------------------------------
+# vorota/tambur теперь декодируются в полный размер холста — владение
+# клеткой больше не привязано к фиксированной половине экрана.
 
 CAMERAS = {
-    "dvor": ((CANVAS_W, CANVAS_H), [
+    "dvor": [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
         "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/dvor_sub",
         "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
-    ]),
-    "vorota": ((HALF_W, CANVAS_H), [
+    ],
+    "vorota": [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
         "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/vorota",
-        "-vf", f"format=nv12,hwupload,scale_vaapi={HALF_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
+        "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
-    ]),
-    "tambur": ((HALF_W, CANVAS_H), [
+    ],
+    "tambur": [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
         "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/tambur",
-        "-vf", f"format=nv12,hwupload,scale_vaapi={HALF_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
+        "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
-    ]),
+    ],
 }
 
 latest_frames: dict[str, np.ndarray] = {}
 frames_lock = threading.Lock()
 
 
-def camera_reader(name: str, size: tuple[int, int], cmd: list[str]) -> None:
-    w, h = size
-    frame_size = w * h * 3
+def camera_reader(name: str, cmd: list[str]) -> None:
+    frame_size = CANVAS_W * CANVAS_H * 3
     with frames_lock:
-        latest_frames[name] = np.zeros((h, w, 3), dtype=np.uint8)
+        latest_frames[name] = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
     while True:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         stdout = proc.stdout
@@ -104,7 +130,7 @@ def camera_reader(name: str, size: tuple[int, int], cmd: list[str]) -> None:
                     if not chunk:
                         raise EOFError
                     data.extend(chunk)
-                frame = np.frombuffer(bytes(data), dtype=np.uint8).reshape(h, w, 3)
+                frame = np.frombuffer(bytes(data), dtype=np.uint8).reshape(CANVAS_H, CANVAS_W, 3)
                 with frames_lock:
                     latest_frames[name] = frame
         except EOFError:
@@ -121,9 +147,11 @@ class MqttState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.move: dict[str, str] = {"p1": "right", "p2": "left"}
+        self.ai_move: dict[str, str] = {"p1": "right", "p2": "left"}
         self.last_input_ts: dict[str, float] = {"p1": 0.0, "p2": 0.0}
         self.mode: dict[str, str] = {"p1": "auto", "p2": "auto"}
         self.control: str | None = None
+        self.difficulty = "normal"
 
     def is_human(self, player: str) -> bool:
         with self.lock:
@@ -138,11 +166,19 @@ class MqttState:
         with self.lock:
             return self.move[player]
 
+    def get_ai_move(self, player: str) -> str:
+        with self.lock:
+            return self.ai_move[player]
+
     def pop_control(self) -> str | None:
         with self.lock:
             c = self.control
             self.control = None
             return c
+
+    def get_difficulty(self) -> str:
+        with self.lock:
+            return self.difficulty
 
 
 mqtt_state = MqttState()
@@ -158,12 +194,19 @@ def on_mqtt_message(client, userdata, msg) -> None:
         elif topic == "xonix/game/p2/move" and payload in DIRS:
             mqtt_state.move["p2"] = payload
             mqtt_state.last_input_ts["p2"] = time.monotonic()
+        elif topic == "xonix/game/p1/ai_move" and payload in DIRS:
+            mqtt_state.ai_move["p1"] = payload
+        elif topic == "xonix/game/p2/ai_move" and payload in DIRS:
+            mqtt_state.ai_move["p2"] = payload
         elif topic == "xonix/game/p1/mode" and payload in ("auto", "ai", "human"):
             mqtt_state.mode["p1"] = payload
         elif topic == "xonix/game/p2/mode" and payload in ("auto", "ai", "human"):
             mqtt_state.mode["p2"] = payload
         elif topic == "xonix/game/control" and payload in ("start", "pause", "restart"):
             mqtt_state.control = payload
+        elif topic == "xonix/game/difficulty" and payload in DIFFICULTY_PRESETS:
+            mqtt_state.difficulty = payload
+            mqtt_state.control = "restart"  # смена сложности на лету — новый раунд с новыми параметрами
 
 
 def start_mqtt() -> mqtt.Client:
@@ -173,9 +216,12 @@ def start_mqtt() -> mqtt.Client:
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
     client.subscribe("xonix/game/p1/move", qos=1)
     client.subscribe("xonix/game/p2/move", qos=1)
+    client.subscribe("xonix/game/p1/ai_move", qos=0)
+    client.subscribe("xonix/game/p2/ai_move", qos=0)
     client.subscribe("xonix/game/p1/mode", qos=1)
     client.subscribe("xonix/game/p2/mode", qos=1)
     client.subscribe("xonix/game/control", qos=1)
+    client.subscribe("xonix/game/difficulty", qos=1)
     client.loop_start()
     return client
 
@@ -185,75 +231,82 @@ def start_mqtt() -> mqtt.Client:
 class Ball:
     __slots__ = ("x", "y", "vx", "vy")
 
-    def __init__(self) -> None:
+    def __init__(self, speed_range: tuple[float, float]) -> None:
         self.x = random.uniform(2, GRID_W - 2)
         self.y = random.uniform(2, GRID_H - 2)
         theta = random.uniform(0, 2 * math.pi)
-        speed = random.uniform(BALL_SPEED_MIN, BALL_SPEED_MAX)
+        speed = random.uniform(*speed_range)
         self.vx = speed * math.cos(theta)
         self.vy = speed * math.sin(theta)
 
 
-class Half:
-    """Одно из двух полей (игрок 1 или игрок 2)."""
+class Field:
+    """Общее поле на двоих: одна сетка, два игрока отнимают территорию у
+    одного нейтрального пула. Стартуют с маленьких баз в противоположных
+    углах."""
 
-    def __init__(self, player: str) -> None:
-        self.player = player
+    def __init__(self, difficulty: str) -> None:
+        self.difficulty = difficulty
         self.reset()
 
     def reset(self) -> None:
+        preset = DIFFICULTY_PRESETS[self.difficulty]
         self.grid = np.zeros((GRID_W, GRID_H), dtype=np.uint8)
-        self.grid[0, :] = TERRITORY
-        self.grid[-1, :] = TERRITORY
-        self.grid[:, 0] = TERRITORY
-        self.grid[:, -1] = TERRITORY
-        self.cursor = (0, 0)
-        self.last_dir = "right" if self.player == "p1" else "left"
-        self.trail: list[tuple[int, int]] = []
-        self.balls = [Ball() for _ in range(NUM_BALLS)]
-        self.raid_len = 0
-        self.raid_target: tuple[int, int] | None = None
+        b = BASE_SIZE
+        self.grid[1:1 + b, 1:1 + b] = P1_TERRITORY
+        self.grid[GRID_W - 1 - b:GRID_W - 1, GRID_H - 1 - b:GRID_H - 1] = P2_TERRITORY
+        self.cursor = {
+            "p1": (1 + b // 2, 1 + b // 2),
+            "p2": (GRID_W - 1 - b // 2, GRID_H - 1 - b // 2),
+        }
+        self.last_dir = {"p1": "right", "p2": "left"}
+        self.trail: dict[str, list[tuple[int, int]]] = {"p1": [], "p2": []}
+        self.raid_len = {"p1": 0, "p2": 0}  # длина текущего следа — публикуется в board для агента
+        self.balls = [Ball(preset["speed"]) for _ in range(preset["num_balls"])]
 
-    def percent(self) -> float:
+    def target_percent(self) -> float:
+        return DIFFICULTY_PRESETS[self.difficulty]["target_percent"]
+
+    def percent(self, player: str) -> float:
         total = GRID_W * GRID_H
-        return 100.0 * int((self.grid == TERRITORY).sum()) / total
+        return 100.0 * int((self.grid == TERRITORY_OF[player]).sum()) / total
 
     def walkable_for_ball(self, ix: int, iy: int) -> bool:
         if ix < 0 or iy < 0 or ix >= GRID_W or iy >= GRID_H:
             return False
-        return self.grid[ix, iy] != TERRITORY
+        return self.grid[ix, iy] in (EMPTY, P1_TRAIL, P2_TRAIL)
 
     def step_balls(self) -> None:
-        for b in self.balls:
-            tx, ty = b.x + b.vx, b.y + b.vy
-            if not self.walkable_for_ball(int(tx), int(b.y)):
-                b.vx = -b.vx
-            if not self.walkable_for_ball(int(b.x), int(ty)):
-                b.vy = -b.vy
-            b.x += b.vx
-            b.y += b.vy
+        for ball in self.balls:
+            tx, ty = ball.x + ball.vx, ball.y + ball.vy
+            if not self.walkable_for_ball(int(tx), int(ball.y)):
+                ball.vx = -ball.vx
+            if not self.walkable_for_ball(int(ball.x), int(ty)):
+                ball.vy = -ball.vy
+            ball.x += ball.vx
+            ball.y += ball.vy
 
     def ball_touches(self, cx: int, cy: int) -> bool:
-        for b in self.balls:
-            if int(b.x) == cx and int(b.y) == cy:
+        for ball in self.balls:
+            if int(ball.x) == cx and int(ball.y) == cy:
                 return True
         return False
 
-    def die(self) -> None:
-        for (tx, ty) in self.trail:
+    def die(self, player: str) -> None:
+        for (tx, ty) in self.trail[player]:
             self.grid[tx, ty] = EMPTY
-        self.trail = []
-        self.raid_len = 0
-        self.raid_target = None  # старая цель могла остаться за пределами нового спавна
-        xs, ys = np.where(self.grid == TERRITORY)
+        self.trail[player] = []
+        self.raid_len[player] = 0
+        xs, ys = np.where(self.grid == TERRITORY_OF[player])
         i = random.randrange(len(xs))
-        self.cursor = (int(xs[i]), int(ys[i]))
+        self.cursor[player] = (int(xs[i]), int(ys[i]))
 
-    def claim_trail_and_flood(self) -> None:
-        for (tx, ty) in self.trail:
-            self.grid[tx, ty] = TERRITORY
-        self.trail = []
-        self.raid_len = 0
+    def claim_trail_and_flood(self, player: str) -> None:
+        code = TERRITORY_OF[player]
+        for (tx, ty) in self.trail[player]:
+            self.grid[tx, ty] = code
+        self.trail[player] = []
+        self.raid_len[player] = 0
         visited = np.zeros((GRID_W, GRID_H), dtype=bool)
         for sx in range(GRID_W):
             for sy in range(GRID_H):
@@ -275,93 +328,55 @@ class Half:
                             stack.append((nx, ny))
                 if not has_ball:
                     for (cx, cy) in component:
-                        self.grid[cx, cy] = TERRITORY
+                        self.grid[cx, cy] = code
 
-    def _pick_raid_target(self) -> tuple[int, int] | None:
-        """Цель набега: случайные точки по всему полю, СРЕДИ НЕЗАНЯТЫХ
-        клеток (раньше цель могла попасть на уже свою территорию — бот её
-        тут же "достигал", не начиная след, и застревал навсегда, гоняясь
-        за той же неактуальной точкой). Из подходящих — самая безопасная
-        (дальше всего от шариков на момент выбора). None, если незанятых
-        клеток рядом не нашлось (поле почти всё занято)."""
-        cx, cy = self.cursor
-        best_pt, best_safety = None, -1e9
-        for _ in range(20):
-            tx = random.randint(1, GRID_W - 2)
-            ty = random.randint(1, GRID_H - 2)
-            if self.grid[tx, ty] != EMPTY or math.hypot(cx - tx, cy - ty) < 3:
-                continue
-            safety = min((math.hypot(b.x - tx, b.y - ty) for b in self.balls), default=99.0)
-            if safety > best_safety:
-                best_safety, best_pt = safety, (tx, ty)
-        return best_pt
-
-    def ai_direction(self) -> str:
-        cx, cy = self.cursor
-        if self.raid_target is not None:
-            tx, ty = self.raid_target
-            reached = math.hypot(cx - tx, cy - ty) < 2
-            too_long = bool(self.trail) and self.raid_len > MAX_RAID_LEN
-            if reached or too_long:
-                self.raid_target = None  # цель достигнута/след слишком длинный — пора домой
-        if self.raid_target is None and not self.trail:
-            self.raid_target = self._pick_raid_target()  # может остаться None, если поле почти занято
-
-        heading_home = bool(self.trail) and self.raid_target is None
-
-        best_d, best_score = self.last_dir, -1e9
-        for d, (dx, dy) in DIRS.items():
-            if self.trail and d == OPPOSITE[self.last_dir]:
-                continue
-            nx, ny = cx + dx, cy + dy
-            if nx < 0 or ny < 0 or nx >= GRID_W or ny >= GRID_H:
-                continue
-            score = random.uniform(0, 1) * 0.2
-            for b in self.balls:
-                dist = math.hypot(b.x - nx, b.y - ny)
-                if dist < 6:
-                    score -= (6 - dist) * 2.5
-            if heading_home or self.raid_target is None:
-                xs, ys = np.where(self.grid == TERRITORY)
-                dists = (xs - nx) ** 2 + (ys - ny) ** 2
-                nearest = dists.min() if len(dists) else 1e9
-                score += 4.0 / (1.0 + nearest)
-            else:
-                tx, ty = self.raid_target
-                score += 2.0 / (1.0 + math.hypot(nx - tx, ny - ty))
-            if score > best_score:
-                best_score, best_d = score, d
-        return best_d
-
-    def step(self, direction: str) -> None:
-        self.last_dir = direction
+    def step(self, player: str, direction: str) -> None:
+        self.last_dir[player] = direction
         dx, dy = DIRS[direction]
-        cx, cy = self.cursor
+        cx, cy = self.cursor[player]
         nx, ny = cx + dx, cy + dy
         if nx < 0 or ny < 0 or nx >= GRID_W or ny >= GRID_H:
-            self.step_balls()
+            if self.trail[player]:
+                # след дошёл до ВНЕШНЕЙ ГРАНИЦЫ поля — она тоже считается
+                # "безопасной землёй" для замыкания контура, как в
+                # оригинальном Ксониксе (там весь периметр поля изначально
+                # занят территорией). Здесь старт — маленькая база в углу,
+                # не весь периметр, но сама граница экрана работает так же:
+                # без этого след, упёршийся в противоположную стену, просто
+                # блокировался бы навсегда, не завершая захват (баг,
+                # найденный на живом потоке — "жёлтый уперся в стену").
+                self.claim_trail_and_flood(player)
             return
+        opp = OPPONENT[player]
         cell = self.grid[nx, ny]
-        if cell == TERRITORY:
-            if self.trail:
-                self.claim_trail_and_flood()
-            self.cursor = (nx, ny)
+
+        if cell == TRAIL_OF[opp]:
+            # наступили на след соперника — он гибнет, клетка становится нейтральной
+            self.die(opp)
+            cell = EMPTY
+
+        if cell == TERRITORY_OF[player]:
+            if self.trail[player]:
+                self.claim_trail_and_flood(player)
+            self.cursor[player] = (nx, ny)
         elif cell == EMPTY:
-            self.grid[nx, ny] = TRAIL
-            self.trail.append((nx, ny))
-            self.raid_len += 1
-            self.cursor = (nx, ny)
+            self.grid[nx, ny] = TRAIL_OF[player]
+            self.trail[player].append((nx, ny))
+            self.raid_len[player] += 1
+            self.cursor[player] = (nx, ny)
             if self.ball_touches(nx, ny):
-                self.die()
-        else:  # TRAIL — самопересечение
-            self.die()
+                self.die(player)
+        elif cell == TRAIL_OF[player]:
+            self.die(player)
+        # else: чужая территория — непроходима как стена, просто не двигаемся
+
+    def step_balls_and_check(self) -> None:
         self.step_balls()
-        # шарик мог заехать на уже существующий след ПОСЛЕ своего хода —
-        # проверяем отдельно от проверки на "только что нарисованную" клетку выше
-        for (tx, ty) in self.trail:
-            if self.ball_touches(tx, ty):
-                self.die()
-                break
+        for player in ("p1", "p2"):
+            for (tx, ty) in self.trail[player]:
+                if self.ball_touches(tx, ty):
+                    self.die(player)
+                    break
 
 
 # --- рендер ---------------------------------------------------------------
@@ -370,37 +385,33 @@ def upsample_mask(grid_bool: np.ndarray) -> np.ndarray:
     return np.repeat(np.repeat(grid_bool, CELL, axis=0), CELL, axis=1)
 
 
-def render(halves: dict[str, Half]) -> np.ndarray:
+def render(field: Field) -> np.ndarray:
     with frames_lock:
-        bg = latest_frames["dvor"].copy()
+        canvas = latest_frames["dvor"].copy()
         cam = {"p1": latest_frames["vorota"], "p2": latest_frames["tambur"]}
 
-    canvas = bg
-    for player, x_off in (("p1", 0), ("p2", HALF_W)):
-        half = halves[player]
-        mask = upsample_mask(half.grid.T == TERRITORY)  # .T: grid[x,y] -> [y,x] под изображение
-        region = canvas[:, x_off:x_off + HALF_W]
-        region[mask] = cam[player][mask]
+    for player in ("p1", "p2"):
+        mask = upsample_mask(field.grid.T == TERRITORY_OF[player])  # .T: grid[x,y] -> [y,x] под изображение
+        canvas[mask] = cam[player][mask]
 
-        trail_mask = upsample_mask(half.grid.T == TRAIL)
+        trail_mask = upsample_mask(field.grid.T == TRAIL_OF[player])
         color = (255, 200, 0) if player == "p1" else (0, 200, 255)
-        region[trail_mask] = color
+        canvas[trail_mask] = color
 
-        # кубик игрока — окошко в его собственную камеру (не в фон, в отличие
-        # от шариков) плюс цветная рамка команды
-        cx, cy = half.cursor
-        px, py = x_off + cx * CELL, cy * CELL
-        canvas[py:py + CELL, px:px + CELL] = cam[player][py:py + CELL, px - x_off:px - x_off + CELL]
+        # кубик игрока — окошко в его собственную камеру плюс цветная рамка команды
+        cx, cy = field.cursor[player]
+        px, py = cx * CELL, cy * CELL
+        canvas[py:py + CELL, px:px + CELL] = cam[player][py:py + CELL, px:px + CELL]
         cv2.rectangle(canvas, (px, py), (px + CELL, py + CELL), color, 2)
 
-        for b in half.balls:
-            bx, by = x_off + int(b.x * CELL), int(b.y * CELL)
-            r = CELL
-            y0, y1 = max(0, by - r // 2), min(CANVAS_H, by + r // 2)
-            x0, x1 = max(0, bx - r // 2), min(CANVAS_W, bx + r // 2)
-            if y1 > y0 and x1 > x0:
-                canvas[y0:y1, x0:x1] = 255 - canvas[y0:y1, x0:x1]
-                cv2.circle(canvas, (bx, by), r // 2, (0, 0, 255), 1)
+    for ball in field.balls:
+        bx, by = int(ball.x * CELL), int(ball.y * CELL)
+        r = CELL
+        y0, y1 = max(0, by - r // 2), min(CANVAS_H, by + r // 2)
+        x0, x1 = max(0, bx - r // 2), min(CANVAS_W, bx + r // 2)
+        if y1 > y0 and x1 > x0:
+            canvas[y0:y1, x0:x1] = 255 - canvas[y0:y1, x0:x1]
+            cv2.circle(canvas, (bx, by), r // 2, (0, 0, 255), 1)
 
     return canvas
 
@@ -408,44 +419,54 @@ def render(halves: dict[str, Half]) -> np.ndarray:
 # --- главный цикл -----------------------------------------------------------
 
 def main() -> None:
-    for name, (size, cmd) in CAMERAS.items():
-        threading.Thread(target=camera_reader, args=(name, size, cmd), daemon=True).start()
+    for name, cmd in CAMERAS.items():
+        threading.Thread(target=camera_reader, args=(name, cmd), daemon=True).start()
 
     client = start_mqtt()
 
-    halves = {"p1": Half("p1"), "p2": Half("p2")}
+    field = Field(mqtt_state.get_difficulty())
     phase = "playing"
     phase_until = 0.0
+    winner = None
 
     stdout = sys.stdout.buffer
     period = 1.0 / FPS
     last_state_pub = 0.0
+    last_board_pub = 0.0
+    BOARD_PERIOD = 0.25  # ~4 раза в секунду — агенту незачем чаще, поле неспешное
 
     while True:
         t0 = time.monotonic()
 
+        cur_difficulty = mqtt_state.get_difficulty()
+        if cur_difficulty != field.difficulty:
+            field.difficulty = cur_difficulty
+
         cmd = mqtt_state.pop_control()
         if cmd == "restart":
-            halves["p1"].reset()
-            halves["p2"].reset()
+            field.reset()
             phase = "playing"
+            winner = None
         elif cmd == "pause":
             phase = "paused" if phase == "playing" else "playing"
 
         if phase == "playing":
-            for player, half in halves.items():
-                direction = mqtt_state.get_move(player) if mqtt_state.is_human(player) else half.ai_direction()
-                half.step(direction)
-            for player, half in halves.items():
-                if half.percent() >= TARGET_PERCENT:
+            for player in ("p1", "p2"):
+                direction = mqtt_state.get_move(player) if mqtt_state.is_human(player) else mqtt_state.get_ai_move(player)
+                field.step(player, direction)
+            field.step_balls_and_check()
+            target = field.target_percent()
+            for player in ("p1", "p2"):
+                if field.percent(player) >= target:
                     phase = "gameover"
+                    winner = player
                     phase_until = t0 + 2.5
         elif phase == "gameover" and t0 >= phase_until:
-            halves["p1"].reset()
-            halves["p2"].reset()
+            field.reset()
             phase = "playing"
+            winner = None
 
-        frame = render(halves)
+        frame = render(field)
         stdout.write(frame.tobytes())
         stdout.flush()
 
@@ -453,12 +474,28 @@ def main() -> None:
             last_state_pub = t0
             state = {
                 "phase": phase,
-                "p1_percent": round(halves["p1"].percent(), 1),
-                "p2_percent": round(halves["p2"].percent(), 1),
+                "difficulty": field.difficulty,
+                "target_percent": field.target_percent(),
+                "p1_percent": round(field.percent("p1"), 1),
+                "p2_percent": round(field.percent("p2"), 1),
                 "p1_controller": "human" if mqtt_state.is_human("p1") else "ai",
                 "p2_controller": "human" if mqtt_state.is_human("p2") else "ai",
+                "winner": winner,
             }
             client.publish("xonix/game/state", json.dumps(state), qos=0)
+
+        if phase == "playing" and t0 - last_board_pub > BOARD_PERIOD:
+            last_board_pub = t0
+            board = {
+                "grid_w": GRID_W,
+                "grid_h": GRID_H,
+                "grid": field.grid.tobytes().hex(),  # плоский массив uint8, GRID_W*GRID_H байт
+                "cursor": {"p1": field.cursor["p1"], "p2": field.cursor["p2"]},
+                "trail_len": {"p1": field.raid_len["p1"], "p2": field.raid_len["p2"]},
+                "last_dir": {"p1": field.last_dir["p1"], "p2": field.last_dir["p2"]},
+                "balls": [[round(b.x, 2), round(b.y, 2)] for b in field.balls],
+            }
+            client.publish("xonix/game/board", json.dumps(board), qos=0)
 
         dt = period - (time.monotonic() - t0)
         if dt > 0:
