@@ -10,7 +10,11 @@
 - private_message — приказ своему боту человеческим текстом, публикуется в
   приватный канал чата (xonix_chat_hub.py, private_p{N}) — виден только
   пользователю и самому этому стратегу, LLM другого игрока его не видит
-  (физически не подписана на этот топик);
+  (физически не подписана на этот топик). Вместе с ним — usage (входные/
+  выходные/закешированные токены этого конкретного запроса), хаб сохраняет
+  его как есть в записи сообщения, дашборд рендерит рядом с репликой;
+  плюс отдельный ретейн-топик xonix/game/p{N}/llm_usage — тот же снимок
+  без прокрутки чата;
 - general_message — необязательная реплика в ОБЩИЙ чат (пользователь + оба
   LLM-стратега), пусто, если сказать нечего — не спамим партию раз в 20с.
 
@@ -114,11 +118,24 @@ def stable_cache_key(system_prompt: str, model: str) -> str:
     return "xonix-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> str:
+def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> tuple[str, dict]:
+    # system_prompt = SYSTEM_PROMPT_TEMPLATE + persona — не меняется между
+    # вызовами, пока пользователь не поправит характер бота (игровое
+    # состояние/чат идут отдельно, в user_prompt) — по идее кандидат для
+    # prompt-кэша. cache_control нужно ставить явно (в отличие от Kimi, тут
+    # сервер сам ничего не кэширует без пометки) — блок system переведён в
+    # форму списка ради этого маркера.
+    # НО: минимальная кэшируемая длина у Haiku 4.5 — 4096 токенов (см. skill
+    # claude-api/shared/prompt-caching.md, порог у Haiku аномально высокий
+    # по сравнению с другими моделями), а наш system-промпт в разы короче —
+    # реально не кэшируется НИКОГДА при текущем размере, маркер просто
+    # молча бездействует (без ошибки и без штрафа). Оставлен на будущее,
+    # если промпт когда-нибудь вырастет — специально раздувать его ради
+    # кэша сейчас не имеет смысла, экономия не окупит закладку токенов.
     body = json.dumps({
         "model": "claude-haiku-4-5",
         "max_tokens": 500,
-        "system": system_prompt,
+        "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         "messages": [{"role": "user", "content": user_prompt}],
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -133,10 +150,17 @@ def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> str
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read())
-    return "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
+    text = "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
+    u = data.get("usage", {})
+    usage = {
+        "input": u.get("input_tokens", 0),
+        "output": u.get("output_tokens", 0),
+        "cached": u.get("cache_read_input_tokens", 0),
+    }
+    return text, usage
 
 
-def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> str:
+def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> tuple[str, dict]:
     model = "kimi-k2.7-code"
     body = json.dumps({
         "model": model,
@@ -159,7 +183,14 @@ def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> str:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read())
-    return data["choices"][0]["message"]["content"]
+    text = data["choices"][0]["message"]["content"]
+    u = data.get("usage", {})
+    usage = {
+        "input": u.get("prompt_tokens", 0),
+        "output": u.get("completion_tokens", 0),
+        "cached": u.get("cached_tokens", 0),
+    }
+    return text, usage
 
 
 def parse_llm_json(text: str) -> dict | None:
@@ -312,14 +343,14 @@ def main() -> None:
                     if not anthropic_key:
                         client.publish(f"xonix/game/{player}/llm_status", "нет ключа anthropic_api_key.txt", qos=0, retain=True)
                         raise RuntimeError("no anthropic key")
-                    text = call_claude_haiku(anthropic_key, system_prompt, user_prompt)
+                    text, usage = call_claude_haiku(anthropic_key, system_prompt, user_prompt)
                 elif provider == "kimi":
                     if not moonshot_key:
                         client.publish(f"xonix/game/{player}/llm_status", "нет ключа moonshot_api_key.txt", qos=0, retain=True)
                         raise RuntimeError("no moonshot key")
-                    text = call_kimi(moonshot_key, system_prompt, user_prompt)
+                    text, usage = call_kimi(moonshot_key, system_prompt, user_prompt)
                 else:
-                    text = None
+                    text, usage = None, None
 
                 if text is not None:
                     params = parse_llm_json(text)
@@ -330,9 +361,21 @@ def main() -> None:
                             qos=0, retain=True,
                         )
                         client.publish(f"xonix/game/{player}/llm_status", "ok", qos=0, retain=True)
+                        # Цена этого конкретного запроса — отдельным ретейн-топиком
+                        # (видно и без прокрутки чата) И прикреплена к самому приватному
+                        # сообщению (usage), чтобы отображалась прямо рядом с репликой,
+                        # как просил пользователь, а не только в статике.
+                        client.publish(
+                            f"xonix/game/{player}/llm_usage",
+                            json.dumps({"provider": provider, **usage}, ensure_ascii=False),
+                            qos=0, retain=True,
+                        )
                         client.publish(
                             f"xonix/chat/post/{player}",
-                            json.dumps({"channel": "private", "text": params["private_message"]}, ensure_ascii=False),
+                            json.dumps(
+                                {"channel": "private", "text": params["private_message"], "usage": {"provider": provider, **usage}},
+                                ensure_ascii=False,
+                            ),
                             qos=1,
                         )
                         if params["general_message"]:

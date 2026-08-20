@@ -84,11 +84,17 @@ class Hub:
         except OSError:
             pass
 
-    def append(self, channel: str, sender: str, text: str, kind: str = "chat") -> dict:
+    def append(self, channel: str, sender: str, text: str, kind: str = "chat", usage: dict | None = None) -> dict:
         text = text.strip()
         if not text:
             return {}
         entry = {"ts": time.time(), "sender": sender, "text": text[:400], "kind": kind}
+        if usage:
+            # Цена конкретного запроса к LLM (вход/выход/закешировано,
+            # см. xonix_llm_strategist.py) — прикреплена к сообщению, чтобы
+            # дашборд мог показать её прямо рядом с репликой, не только
+            # в отдельном топике llm_usage.
+            entry["usage"] = usage
         with self.lock:
             self.history[channel].append(entry)
             self.history[channel] = self.history[channel][-HISTORY_LIMIT:]
@@ -117,6 +123,7 @@ def main() -> None:
             payload = json.loads(msg.payload)
             text = str(payload.get("text", ""))
             channel_hint = payload.get("channel", "general")
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
         except (json.JSONDecodeError, TypeError):
             return
         if not text:
@@ -134,7 +141,7 @@ def main() -> None:
         else:
             return
 
-        result = hub.append(channel, sender, text)
+        result = hub.append(channel, sender, text, usage=usage)
         if result:
             publish_channel(client, channel, result["messages"])
 
