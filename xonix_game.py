@@ -433,7 +433,8 @@ def _get_hud_font() -> ImageFont.FreeTypeFont | None:
 
 
 def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
-    """Полупрозрачная полоска статистики сверху канвы — проценты территории
+    """Полупрозрачная полоска статистики ПО ЦЕНТРУ канвы по вертикали
+    (по просьбе пользователя — раньше была сверху) — проценты территории
     и счёт побед. По прямому запросу пользователя ("информацию об успехах
     игроков... показывать в потоке в виде полупрозрачного блока") — именно
     В ВИДЕОПОТОКЕ, не только на дашборде HA, поэтому рисуется прямо на
@@ -443,6 +444,7 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     if font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
     h = 34
+    y0 = (CANVAS_H - h) // 2
     strip = Image.new("RGBA", (CANVAS_W, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(strip)
     draw.rectangle([0, 0, CANVAS_W, h], fill=(0, 0, 0, 115))
@@ -455,8 +457,8 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     strip_rgba = np.array(strip, dtype=np.float32)
     alpha = strip_rgba[:, :, 3:4] / 255.0
     strip_bgr = strip_rgba[:, :, [2, 1, 0]]
-    region = canvas[0:h, 0:CANVAS_W].astype(np.float32)
-    canvas[0:h, 0:CANVAS_W] = (strip_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+    region = canvas[y0:y0 + h, 0:CANVAS_W].astype(np.float32)
+    canvas[y0:y0 + h, 0:CANVAS_W] = (strip_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
     return canvas
 
 
