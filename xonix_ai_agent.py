@@ -23,6 +23,14 @@ xonix/game/p{N}/strategy (retained), агент подписан и перекл
   базовым уклонением от шариков, без цели и без осмысленного возврата
   домой. Настоящая "лёгкая" стратегия для выбора на дашборде, а не
   формальная вторая позиция в списке.
+
+Третий, необязательный уровень — xonix_llm_strategist.py: раз в ~20с
+спрашивает настоящую LLM (Claude Haiku / Kimi) "как в целом играть" по
+тексту-"характеру" от пользователя и публикует в xonix/game/p{N}/llm_params
+веса aggression/caution — strategy_smart их читает и подмешивает в свою
+обычную одношаговую оценку (не подменяет её — LLM слишком медленная для
+решения каждого хода). По умолчанию весов нет, эвристика работает как
+раньше (0.5/0.5 — нейтрально).
 """
 import argparse
 import json
@@ -69,6 +77,11 @@ class BoardState:
         self.balls: list[tuple[float, float]] = []
         self.raid_target: tuple[int, int] | None = None  # состояние стратегии "smart", живёт тут в агенте
         self.last_update_ts: float | None = None
+        # веса от xonix_llm_strategist.py (третий, медленный уровень — не решает
+        # ходы, только настраивает "характер" быстрой эвристики раз в ~20с).
+        # 0.5/0.5 — нейтральные значения, воспроизводящие поведение ДО того, как
+        # эта настройка появилась (обратная совместимость по умолчанию).
+        self.llm_params = {"aggression": 0.5, "caution": 0.5}
 
     def update(self, msg: dict) -> None:
         with self.lock:
@@ -180,6 +193,11 @@ def strategy_smart(player: str, board: BoardState) -> str:
     target = board.raid_target
     heading_home = trailing and target is None
     prev_dir = last_dir.get(player, "right")
+    opp_territory = TERRITORY_OF[opp]
+
+    llm = board.llm_params
+    aggression = llm.get("aggression", 0.5)
+    caution_factor = 0.5 + llm.get("caution", 0.5)  # 0.5 (беспечно) .. 1.5 (осторожно), 1.0 = как раньше
 
     best_d, best_score = prev_dir, -1e9
     for d, (dx, dy) in DIRS.items():
@@ -193,10 +211,14 @@ def strategy_smart(player: str, board: BoardState) -> str:
         for bx, by in balls:
             dist = math.hypot(bx - nx, by - ny)
             if dist < 6:
-                score -= (6 - dist) * 2.5
+                score -= (6 - dist) * 2.5 * caution_factor
         odist = math.hypot(opp_cursor[0] - nx, opp_cursor[1] - ny)
         if odist < 3:
-            score -= (3 - odist) * 1.0
+            score -= (3 - odist) * 1.0 * caution_factor
+        if grid[nx, ny] == opp_territory:
+            # LLM-настройка "агрессии" — насколько охотно лезть на чужую
+            # землю сверх того, что и так подскажет обычная жадная оценка
+            score += aggression * 3.0
 
         if exiting:
             xs, ys = np.where(grid == EMPTY)
@@ -244,6 +266,15 @@ def main() -> None:
                     state["strategy"] = payload
                 if changed:
                     client.publish(f"xonix/game/{player}/strategy_active", payload, qos=0, retain=True)
+        elif msg.topic == f"xonix/game/{player}/llm_params":
+            # публикует xonix_llm_strategist.py раз в ~20с — не решение хода,
+            # а настройка "характера" strategy_smart (см. её докстринг)
+            try:
+                params = json.loads(msg.payload)
+                board.llm_params["aggression"] = float(params.get("aggression", 0.5))
+                board.llm_params["caution"] = float(params.get("caution", 0.5))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
 
     client = mqtt.Client()
     client.username_pw_set(MQTT_USER, MQTT_PASS)
@@ -251,6 +282,7 @@ def main() -> None:
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
     client.subscribe("xonix/game/board", qos=0)
     client.subscribe(f"xonix/game/{player}/strategy", qos=1)
+    client.subscribe(f"xonix/game/{player}/llm_params", qos=0)
     client.loop_start()
     # подтверждаем реально применённую стратегию сразу при старте (не только
     # при смене) — иначе дашборд не знает актуальное значение по умолчанию,

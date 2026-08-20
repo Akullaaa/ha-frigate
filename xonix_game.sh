@@ -11,6 +11,12 @@
 # продюсер (нет зрителей потока), пайп рвётся, скрипт завершается, trap
 # убивает обоих агентов — не остаются висеть orphan-процессами.
 #
+# Плюс (третий уровень) — два процесса xonix_llm_strategist.py, по одному
+# на игрока: раз в ~20с спрашивают настоящую LLM и тюнят параметры
+# xonix_ai_agent.py (xonix/game/p{N}/llm_params). По умолчанию provider=none
+# — простаивают без единого вызова API, пока не выбран провайдер с дашборда.
+# Тот же trap их тоже убивает.
+#
 # Заведён как go2rtc exec-источник — см. go2rtc.streams.xonix_game в
 # config.yaml.
 set -e
@@ -21,9 +27,13 @@ python3 /config/xonix_ai_agent.py p1 &
 AGENT_P1=$!
 python3 /config/xonix_ai_agent.py p2 &
 AGENT_P2=$!
+python3 /config/xonix_llm_strategist.py p1 &
+LLM_P1=$!
+python3 /config/xonix_llm_strategist.py p2 &
+LLM_P2=$!
 
 cleanup() {
-  kill "$AGENT_P1" "$AGENT_P2" 2>/dev/null || true
+  kill "$AGENT_P1" "$AGENT_P2" "$LLM_P1" "$LLM_P2" 2>/dev/null || true
 }
 trap cleanup EXIT
 

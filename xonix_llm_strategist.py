@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Третий, самый медленный уровень управления ботом — НЕ решает ходы (это
+делает xonix_ai_agent.py каждые 0.25с), а раз в DECIDE_INTERVAL секунд
+спрашивает настоящую LLM "как в целом сейчас играть" и публикует
+числовые веса (агрессия/осторожность), которые быстрая эвристика
+подмешивает в свою обычную оценку хода. Текст-"характер" бота
+(xonix/game/p{N}/persona, редактируется с дашборда — mqtt: text:)
+передаётся LLM как есть при каждом вызове.
+
+Почему не решает ходы напрямую: LLM отвечает секунду-другую, ходы нужны
+4 раза в секунду — на порядок быстрее. Вместо этого LLM управляет
+"характером" эвристики, а не заменяет её.
+
+Два провайдера на выбор (xonix/game/p{N}/llm_provider — none/haiku/kimi,
+переключается на лету):
+- haiku — Claude Haiku 4.5, ключ из device_credentials/anthropic_api_key.txt
+  (пока нет файла — просто пропускает вызовы, как provider=none).
+- kimi  — тот же Moonshot-ключ, что уже используется для Roo Code
+  (device_credentials/moonshot_api_key.txt), НАПРЯМУЮ к api.moonshot.ai —
+  локальный кэш-прокси на порту 8124 живёт в ДРУГОМ контейнере
+  (Studio Code Server), из контейнера Frigate недоступен по localhost
+  (та же сетевая изоляция аддонов, что уже не раз ловили в этом проекте).
+  Вместо прокси — тот же приём кэширования (стабильный prompt_cache_key
+  по хэшу системного промпта) реализован здесь напрямую.
+
+По умолчанию provider=none — ни одного вызова API, ни одной копейки,
+пока пользователь явно не выберет провайдера с дашборда.
+
+Раздельные ключи и креды — по запросу пользователя, не хранить/угадывать
+самостоятельно.
+"""
+import argparse
+import hashlib
+import json
+import math
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import paho.mqtt.client as mqtt
+
+MQTT_HOST = "core-mosquitto"
+MQTT_PORT = 1883
+MQTT_USER = "frigateu"
+MQTT_PASS = "qqqqqqq7"
+
+DECIDE_INTERVAL = 20.0  # секунд между обращениями к LLM — не на каждый тик
+STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольше — движка нет, выходим
+
+ANTHROPIC_KEY_PATH = "/config/device_credentials/anthropic_api_key.txt"
+MOONSHOT_KEY_PATH = "/config/device_credentials/moonshot_api_key.txt"
+
+SYSTEM_PROMPT_TEMPLATE = (
+    "Ты определяешь общую стратегию бота в игре захвата территории "
+    "(упрощённый Ксоникс, общее поле на двоих, можно захватывать и уже "
+    "занятую территорию соперника, а не только нейтральную). "
+    "Характер бота, заданный пользователем: \"{persona}\"\n\n"
+    "Отвечай СТРОГО одним JSON-объектом, без пояснений и без markdown-"
+    "разметки: {{\"aggression\": <0..1>, \"caution\": <0..1>, "
+    "\"note\": \"<до 12 слов по-русски, что сейчас важно и почему>\"}}\n"
+    "aggression — насколько активно вторгаться на территорию соперника "
+    "(0 = никогда, 1 = искать любую возможность).\n"
+    "caution — насколько сильно избегать шариков и соперника "
+    "(0 = игнорировать риск, 1 = максимально осторожно)."
+)
+
+
+def read_key(path: str) -> str | None:
+    # Файлы в device_credentials/ обычно начинаются с пояснения на русском
+    # (см. moonshot_api_key.txt) — сам ключ ищем по префиксу "sk-", а не
+    # по первой непустой строке.
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("sk-"):
+                    return line
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def stable_cache_key(system_prompt: str, model: str) -> str:
+    payload = json.dumps({"system": system_prompt, "model": model}, sort_keys=True, ensure_ascii=False)
+    return "xonix-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def call_claude_haiku(api_key: str, system_prompt: str, user_prompt: str) -> str:
+    body = json.dumps({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 500,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
+
+
+def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> str:
+    model = "kimi-k2.7-code"
+    body = json.dumps({
+        "model": model,
+        "temperature": 1,  # эта модель принимает только 1, см. алёна.md
+        # Ризонинг-модель: часть токенов уходит в скрытые reasoning_content
+        # ДО финального ответа (проверено вживую — 200 не хватало, ответ
+        # обрывался пустым при finish_reason="length"; 1000 хватает с запасом).
+        "max_tokens": 1200,
+        "prompt_cache_key": stable_cache_key(system_prompt, model),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.moonshot.ai/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return data["choices"][0]["message"]["content"]
+
+
+def parse_llm_json(text: str) -> dict | None:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    try:
+        aggression = max(0.0, min(1.0, float(obj.get("aggression", 0.5))))
+        caution = max(0.0, min(1.0, float(obj.get("caution", 0.5))))
+    except (TypeError, ValueError):
+        return None
+    return {"aggression": aggression, "caution": caution, "note": str(obj.get("note", ""))[:200]}
+
+
+class Shared:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.provider = "none"
+        self.persona = "Играй сбалансированно — не слишком рискованно, не слишком пассивно."
+        self.last_state_ts: float | None = None
+        self.state: dict = {}
+        self.board_summary = ""  # заполняется из board, компактно
+
+
+def build_user_prompt(player: str, shared: Shared) -> str:
+    opp = "p2" if player == "p1" else "p1"
+    with shared.lock:
+        s = shared.state
+    my_pct = s.get(f"{player}_percent", "?")
+    opp_pct = s.get(f"{opp}_percent", "?")
+    difficulty = s.get("difficulty", "?")
+    return (
+        f"Моя территория: {my_pct}%, территория соперника: {opp_pct}%, "
+        f"сложность: {difficulty}."
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("player", choices=["p1", "p2"])
+    args = parser.parse_args()
+    player = args.player
+
+    shared = Shared()
+
+    def on_message(client, userdata, msg) -> None:
+        if msg.topic == "xonix/game/state":
+            try:
+                with shared.lock:
+                    shared.state = json.loads(msg.payload)
+                    shared.last_state_ts = time.monotonic()
+            except json.JSONDecodeError:
+                pass
+        elif msg.topic == f"xonix/game/{player}/llm_provider":
+            payload = msg.payload.decode("utf-8", errors="ignore").strip()
+            if payload in ("none", "haiku", "kimi"):
+                with shared.lock:
+                    shared.provider = payload
+        elif msg.topic == f"xonix/game/{player}/persona":
+            with shared.lock:
+                shared.persona = msg.payload.decode("utf-8", errors="ignore").strip() or shared.persona
+
+    client = mqtt.Client()
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.on_message = on_message
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    client.subscribe("xonix/game/state", qos=0)
+    client.subscribe(f"xonix/game/{player}/llm_provider", qos=1)
+    client.subscribe(f"xonix/game/{player}/persona", qos=1)
+    client.loop_start()
+
+    anthropic_key = read_key(ANTHROPIC_KEY_PATH)
+    moonshot_key = read_key(MOONSHOT_KEY_PATH)
+
+    start_ts = time.monotonic()
+    while True:
+        t0 = time.monotonic()
+
+        with shared.lock:
+            last_state_ts = shared.last_state_ts
+        if last_state_ts is None:
+            if t0 - start_ts > STATE_STALE_TIMEOUT:
+                return
+        elif t0 - last_state_ts > STATE_STALE_TIMEOUT:
+            return
+
+        with shared.lock:
+            provider = shared.provider
+            persona = shared.persona
+
+        if provider != "none" and last_state_ts is not None:
+            system_prompt = SYSTEM_PROMPT_TEMPLATE.format(persona=persona)
+            user_prompt = build_user_prompt(player, shared)
+            try:
+                if provider == "haiku":
+                    if not anthropic_key:
+                        client.publish(f"xonix/game/{player}/llm_status", "нет ключа anthropic_api_key.txt", qos=0, retain=True)
+                        raise RuntimeError("no anthropic key")
+                    text = call_claude_haiku(anthropic_key, system_prompt, user_prompt)
+                elif provider == "kimi":
+                    if not moonshot_key:
+                        client.publish(f"xonix/game/{player}/llm_status", "нет ключа moonshot_api_key.txt", qos=0, retain=True)
+                        raise RuntimeError("no moonshot key")
+                    text = call_kimi(moonshot_key, system_prompt, user_prompt)
+                else:
+                    text = None
+
+                if text is not None:
+                    params = parse_llm_json(text)
+                    if params is not None:
+                        client.publish(f"xonix/game/{player}/llm_params", json.dumps(params), qos=0, retain=True)
+                        client.publish(f"xonix/game/{player}/llm_status", "ok", qos=0, retain=True)
+                    else:
+                        client.publish(f"xonix/game/{player}/llm_status", f"не разобрал ответ: {text[:150]}", qos=0, retain=True)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, RuntimeError) as e:
+                client.publish(f"xonix/game/{player}/llm_status", f"ошибка: {e}", qos=0, retain=True)
+            except Exception as e:  # не даём случайной ошибке парсинга убить процесс
+                client.publish(f"xonix/game/{player}/llm_status", f"неожиданная ошибка: {e}", qos=0, retain=True)
+
+        dt = DECIDE_INTERVAL - (time.monotonic() - t0)
+        if dt > 0:
+            time.sleep(dt)
+
+
+if __name__ == "__main__":
+    main()
