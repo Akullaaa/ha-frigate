@@ -89,6 +89,7 @@ EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
 TERRITORY_OF = {"p1": P1_TERRITORY, "p2": P2_TERRITORY}
 TRAIL_OF = {"p1": P1_TRAIL, "p2": P2_TRAIL}
 OPPONENT = {"p1": "p2", "p2": "p1"}
+PLAYER_COLOR = {"p1": (255, 200, 0), "p2": (0, 200, 255)}  # BGR: p1 Голубой, p2 Жёлтый
 
 DIRS = {
     "up": (0, -1),
@@ -490,6 +491,9 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
                 lines.append(f"    кэш: {cached} токенов")
             lines.append(f"    цена: {usage.get('cost_cents', 0.0):.4f}¢")
             lines.append(f"    всего: {usage.get('total_cost_cents', 0.0):.4f}¢")
+            if "advantage_cents" in usage:
+                adv = usage["advantage_cents"]
+                lines.append(f"    выгода: +{adv:.4f}¢" if adv >= 0 else f"    дороже: {-adv:.4f}¢")
         else:
             status = mqtt_state.llm_status[player] or "жду первый ответ…"
             lines.append(f"    {status}")
@@ -555,17 +559,43 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     return canvas
 
 
+def flash_win(stdout, game_frame: np.ndarray, color: tuple[int, int, int]) -> None:
+    """Три моргания цветом победителя во весь экран в момент победы —
+    по прямому запросу пользователя. Блокирует игровой цикл на доли
+    секунды (разовое событие раз в партию, не каждый кадр), между
+    цветными кадрами показывает уже отрисованный финальный кадр партии,
+    а не чёрный экран."""
+    period = 1.0 / FPS
+    solid = np.full((CANVAS_H, CANVAS_W, 3), color, dtype=np.uint8)
+    on_frames = max(1, FPS // 4)
+    off_frames = max(1, FPS // 4)
+    for _ in range(3):
+        for _ in range(on_frames):
+            stdout.write(solid.tobytes())
+            stdout.flush()
+            time.sleep(period)
+        for _ in range(off_frames):
+            stdout.write(game_frame.tobytes())
+            stdout.flush()
+            time.sleep(period)
+
+
 def render(field: Field) -> np.ndarray:
     with frames_lock:
         canvas = latest_frames["dvor"].copy()
         cam = {"p1": latest_frames["vorota"], "p2": latest_frames["tambur"]}
 
     for player in ("p1", "p2"):
+        color = PLAYER_COLOR[player]
         mask = upsample_mask(field.grid.T == TERRITORY_OF[player])  # .T: grid[x,y] -> [y,x] под изображение
         canvas[mask] = cam[player][mask]
 
+        # тонкий контур по цвету игрока вдоль границы захваченной территории
+        # — по прямому запросу пользователя, поверх уже закрашенной маски.
+        contours, _ = cv2.findContours(mask.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(canvas, contours, -1, color, 1)
+
         trail_mask = upsample_mask(field.grid.T == TRAIL_OF[player])
-        color = (255, 200, 0) if player == "p1" else (0, 200, 255)
         canvas[trail_mask] = color
 
         # кубик игрока — окошко в его собственную камеру плюс цветная рамка команды
@@ -634,6 +664,7 @@ def main() -> None:
                     phase_until = t0 + 2.5
                     wins[player] += 1
                     save_wins(wins)
+                    flash_win(stdout, draw_hud(render(field), field, wins), PLAYER_COLOR[player])
         elif phase == "gameover" and t0 >= phase_until:
             field.reset()
             phase = "playing"

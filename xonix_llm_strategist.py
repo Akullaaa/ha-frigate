@@ -64,15 +64,20 @@ MQTT_PASS = "qqqqqqq7"
 DECIDE_INTERVAL = 20.0  # секунд между обращениями к LLM — не на каждый тик
 STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольше — движка нет, выходим
 
-# Цены USD за 1M токенов — тот же формат/источник, что и openAiCustomModelInfo
-# у Roo Code для Kimi (см. алёна.md, раздел про Moonshot-прокси: вход 1.67,
-# выход 8.33, чтение кэша 0.28 — курс уже заложен в исходных ¥/1M). Haiku 4.5
-# подтверждён через skill claude-api (2026-08-21): $1.00/$5.00 за 1M,
-# cache_read — стандартные ~0.1x входной цены (Anthropic), на практике не
-# используется — кэш для Haiku тут всегда 0 (см. project_xonix_game.md).
+# Цены USD за 1M токенов. Haiku 4.5 подтверждён через skill claude-api
+# (2026-08-21): $1.00/$5.00, cache_read — стандартные ~0.1x входной цены
+# (Anthropic), на практике не используется — кэш для Haiku тут всегда 0
+# (см. project_xonix_game.md). Kimi — ПРЯМОЙ WebFetch с официальной
+# документации platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-21):
+# вход при промахе кэша $0.95, вход при попадании в кэш $0.19, выход $4.00.
+# Раньше здесь стояли цифры из старого конфига Roo Code ($1.67/$8.33/$0.28) —
+# оказались устаревшими, официальная страница даёт заметно другие числа
+# (все прошлые расчёты цен в этом файле были завышены минимум в 1.7 раза,
+# см. project_xonix_game.md про сравнение kimi-k2.6/k2.7-code/highspeed/k3 —
+# k2.7-code, что уже используется здесь, оказалась САМОЙ дешёвой из четырёх).
 PRICING_USD_PER_1M = {
     "haiku": {"input": 1.00, "output": 5.00, "cache_read": 0.10},
-    "kimi": {"input": 1.67, "output": 8.33, "cache_read": 0.28},
+    "kimi": {"input": 0.95, "output": 4.00, "cache_read": 0.19},
 }
 
 COST_FILE = "/config/xonix_llm_cost.json"
@@ -122,6 +127,25 @@ def add_cost(consumer: str, cents: float) -> float:
     except OSError:
         pass
     return data[consumer]
+
+
+OPPONENT_OF = {"p1": "p2", "p2": "p1"}
+
+
+def compute_advantage_cents(player: str, my_total: float) -> float | None:
+    """Выгода/перерасход в центах по сравнению с суммарным итогом
+    оппонента — по прямому запросу пользователя ("расчётное поле... выгода
+    цены по сравнению с оппонентом"). Положительное число — этот игрок
+    дешевле соперника (в выгоде), отрицательное — дороже. Оба стратега
+    (p1/p2) копят общий итог в одном COST_FILE (см. add_cost выше), поэтому
+    актуальный итог соперника читается прямо оттуда, без обмена сообщениями
+    между процессами. None — для консьюмеров без оппонента (alena)."""
+    opponent = OPPONENT_OF.get(player)
+    if opponent is None:
+        return None
+    opponent_total = load_total_cost().get(opponent, 0.0)
+    return opponent_total - my_total
+
 
 ANTHROPIC_KEY_PATH = "/config/device_credentials/anthropic_api_key.txt"
 MOONSHOT_KEY_PATH = "/config/device_credentials/moonshot_api_key.txt"
@@ -429,6 +453,9 @@ def main() -> None:
                         total_cents = add_cost(player, cost_cents)
                         usage["cost_cents"] = round(cost_cents, 4)
                         usage["total_cost_cents"] = round(total_cents, 4)
+                        advantage = compute_advantage_cents(player, total_cents)
+                        if advantage is not None:
+                            usage["advantage_cents"] = round(advantage, 4)
                         # Цена этого конкретного запроса — отдельным ретейн-топиком
                         # (видно и без прокрутки чата) И прикреплена к самому приватному
                         # сообщению (usage), чтобы отображалась прямо рядом с репликой,
