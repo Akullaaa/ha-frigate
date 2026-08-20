@@ -8,9 +8,13 @@
 
 Каналы:
 - general    — общий: пользователь + оба LLM-стратега видят и пишут сюда.
-  Сюда же периодически (раз в STATUS_INTERVAL) подмешивается статус партии
-  (проценты/сложность/фаза) отдельной записью kind="status" — на дашборде
-  рендерится полупрозрачным блоком, не как реплика.
+  Статус партии сюда НЕ подмешивается (было так раньше — убрано 2026-08-20:
+  боты общаются каждые ~15-20с, статус раз в STATUS_INTERVAL быстро вытеснял
+  редкие реплики пользователя из ограниченного окна истории — сообщение
+  реально уходило за HISTORY_LIMIT, не баг рендера, а вытеснение). Счёт и
+  так дублируется на вкладках xonix-p1/p2/video через sensor.ksoniks_sostoianie
+  — дашборд рисует счёт статично сверху ленты чата тем же сенсором, не
+  тратя слоты истории общего канала на то, что и так видно рядом.
 - private_p1 — приватный канал LLM-стратега p1 к своему боту. Читает
   ТОЛЬКО xonix_llm_strategist.py p1 (просто не подписывается на private_p2)
   и пользователь на дашборде (как "третий независимый эксперт", видит оба
@@ -52,7 +56,6 @@ MQTT_PASS = "qqqqqqq7"
 HISTORY_FILE = "/config/xonix_chat_history.json"
 HISTORY_LIMIT = 60  # сообщений на канал
 
-STATUS_INTERVAL = 15.0  # как часто подмешивать статус партии в общий канал
 STARTUP_GRACE = 30.0
 STATE_STALE_TIMEOUT = 30.0  # как у xonix_llm_strategist.py — движка нет, выходим
 
@@ -64,9 +67,7 @@ class Hub:
         self.lock = threading.Lock()
         self.history: dict[str, list[dict]] = {c: [] for c in CHANNELS}
         self._load()
-        self.last_state: dict = {}
         self.last_state_ts: float | None = None
-        self.last_status_post_ts = 0.0
 
     def _load(self) -> None:
         try:
@@ -112,11 +113,10 @@ def main() -> None:
 
     def on_message(client, userdata, msg) -> None:
         if msg.topic == "xonix/game/state":
-            try:
-                hub.last_state = json.loads(msg.payload)
-                hub.last_state_ts = time.monotonic()
-            except json.JSONDecodeError:
-                pass
+            # Не парсим содержимое — оно нужно только как признак "движок жив"
+            # для самоочистки по таймауту (см. STARTUP_GRACE/STATE_STALE_TIMEOUT
+            # ниже), счёт партии в общий чат больше не подмешиваем.
+            hub.last_state_ts = time.monotonic()
             return
 
         try:
@@ -169,19 +169,6 @@ def main() -> None:
                 return
         elif (t0 - hub.last_state_ts) > STATE_STALE_TIMEOUT:
             return
-
-        if hub.last_state and (t0 - hub.last_status_post_ts) > STATUS_INTERVAL:
-            s = hub.last_state
-            text = (
-                f"Голубой: {s.get('p1_percent', '?')}% · "
-                f"Жёлтый: {s.get('p2_percent', '?')}% · "
-                f"сложность {s.get('difficulty', '?')} · цель {s.get('target_percent', '?')}% · "
-                f"фаза {s.get('phase', '?')}"
-            )
-            result = hub.append("general", "system", text, kind="status")
-            if result:
-                publish_channel(client, "general", result["messages"])
-            hub.last_status_post_ts = t0
 
         time.sleep(1.0)
 
