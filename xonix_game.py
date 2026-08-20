@@ -54,6 +54,7 @@ import time
 import cv2
 import numpy as np
 import paho.mqtt.client as mqtt
+from PIL import Image, ImageDraw, ImageFont
 
 FF = "/usr/lib/ffmpeg/7.0/bin/ffmpeg"
 CANVAS_W, CANVAS_H = 960, 540
@@ -61,6 +62,13 @@ FPS = 12
 CELL = 12
 GRID_W = CANVAS_W // CELL  # 80
 GRID_H = CANVAS_H // CELL  # 45
+
+# cv2.putText не умеет кириллицу (только Hershey-шрифты, ASCII) — HUD со
+# счётом рисуется через PIL шрифтом NotoSans (скачан и закоммичен прямо в
+# репозиторий, а не взят из системных шрифтов контейнера — на момент
+# написания в контейнере Frigate вообще не было ни одного TTF с кириллицей).
+HUD_FONT_PATH = "/config/fonts/NotoSans.ttf"
+WINS_FILE = "/config/xonix_wins.json"
 
 MQTT_HOST = "core-mosquitto"
 MQTT_PORT = 1883
@@ -388,10 +396,68 @@ class Field:
                     break
 
 
+def load_wins() -> dict:
+    try:
+        with open(WINS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {"p1": int(data.get("p1", 0)), "p2": int(data.get("p2", 0))}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+        return {"p1": 0, "p2": 0}
+
+
+def save_wins(wins: dict) -> None:
+    try:
+        with open(WINS_FILE, "w", encoding="utf-8") as f:
+            json.dump(wins, f)
+    except OSError:
+        pass
+
+
 # --- рендер ---------------------------------------------------------------
 
 def upsample_mask(grid_bool: np.ndarray) -> np.ndarray:
     return np.repeat(np.repeat(grid_bool, CELL, axis=0), CELL, axis=1)
+
+
+_hud_font: ImageFont.FreeTypeFont | None = None
+
+
+def _get_hud_font() -> ImageFont.FreeTypeFont | None:
+    global _hud_font
+    if _hud_font is None:
+        try:
+            _hud_font = ImageFont.truetype(HUD_FONT_PATH, 18)
+        except OSError:
+            _hud_font = False  # шрифта нет — не пытаться заново каждый кадр
+    return _hud_font or None
+
+
+def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
+    """Полупрозрачная полоска статистики сверху канвы — проценты территории
+    и счёт побед. По прямому запросу пользователя ("информацию об успехах
+    игроков... показывать в потоке в виде полупрозрачного блока") — именно
+    В ВИДЕОПОТОКЕ, не только на дашборде HA, поэтому рисуется прямо на
+    кадре, а не отдельной карточкой снаружи. Полупрозрачность (не полностью
+    непрозрачная подложка) — чтобы не закрывать игровое поле под ней."""
+    font = _get_hud_font()
+    if font is None:
+        return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
+    h = 34
+    strip = Image.new("RGBA", (CANVAS_W, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(strip)
+    draw.rectangle([0, 0, CANVAS_W, h], fill=(0, 0, 0, 115))
+    p1_text = f"Голубой {field.percent('p1'):.1f}%  побед: {wins['p1']}"
+    p2_text = f"Жёлтый {field.percent('p2'):.1f}%  побед: {wins['p2']}"
+    draw.text((10, 7), p1_text, font=font, fill=(0, 200, 255, 255))
+    p2_w = draw.textlength(p2_text, font=font)
+    draw.text((CANVAS_W - 10 - p2_w, 7), p2_text, font=font, fill=(255, 200, 0, 255))
+
+    strip_rgba = np.array(strip, dtype=np.float32)
+    alpha = strip_rgba[:, :, 3:4] / 255.0
+    strip_bgr = strip_rgba[:, :, [2, 1, 0]]
+    region = canvas[0:h, 0:CANVAS_W].astype(np.float32)
+    canvas[0:h, 0:CANVAS_W] = (strip_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+    return canvas
 
 
 def render(field: Field) -> np.ndarray:
@@ -437,6 +503,7 @@ def main() -> None:
     phase = "playing"
     phase_until = 0.0
     winner = None
+    wins = load_wins()  # переживает рестарты — накопительный счёт побед
 
     stdout = sys.stdout.buffer
     period = 1.0 / FPS
@@ -470,12 +537,15 @@ def main() -> None:
                     phase = "gameover"
                     winner = player
                     phase_until = t0 + 2.5
+                    wins[player] += 1
+                    save_wins(wins)
         elif phase == "gameover" and t0 >= phase_until:
             field.reset()
             phase = "playing"
             winner = None
 
         frame = render(field)
+        frame = draw_hud(frame, field, wins)
         stdout.write(frame.tobytes())
         stdout.flush()
 
@@ -490,6 +560,7 @@ def main() -> None:
                 "p1_controller": "human" if mqtt_state.is_human("p1") else "ai",
                 "p2_controller": "human" if mqtt_state.is_human("p2") else "ai",
                 "winner": winner,
+                "wins": wins,
             }
             client.publish("xonix/game/state", json.dumps(state), qos=0)
 

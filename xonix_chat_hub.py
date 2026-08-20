@@ -69,6 +69,7 @@ class Hub:
         self._load()
         self.last_state_ts: float | None = None
         self._ack_toggle = False  # чередование "" / ZWSP, см. клиринг поля ввода
+        self.last_winner: str | None = None  # для объявления победы ровно один раз за партию
 
     def _load(self) -> None:
         try:
@@ -114,10 +115,29 @@ def main() -> None:
 
     def on_message(client, userdata, msg) -> None:
         if msg.topic == "xonix/game/state":
-            # Не парсим содержимое — оно нужно только как признак "движок жив"
-            # для самоочистки по таймауту (см. STARTUP_GRACE/STATE_STALE_TIMEOUT
-            # ниже), счёт партии в общий чат больше не подмешиваем.
             hub.last_state_ts = time.monotonic()
+            # Содержимое game/state в общий чат больше НЕ подмешиваем построчно
+            # (раньше делали это раз в 15с — вытесняло редкие сообщения
+            # пользователя из HISTORY_LIMIT, см. память проекта). Но момент
+            # ПОБЕДЫ — редкое, значимое событие, не спам, и его стоит
+            # объявить: "выводить счёт, кто сколько раз выиграл" — прямой
+            # запрос пользователя. Реагируем только на переход None -> игрок
+            # (по одному объявлению на партию, не на весь период "gameover").
+            try:
+                s = json.loads(msg.payload)
+                winner = s.get("winner")
+                wins = s.get("wins")
+                names = {"p1": "Голубой", "p2": "Жёлтый"}
+                if winner in names and winner != hub.last_winner:
+                    text = f"🏆 Победа: {names[winner]}!"
+                    if isinstance(wins, dict):
+                        text += f" Счёт побед — Голубой {wins.get('p1', '?')}, Жёлтый {wins.get('p2', '?')}."
+                    result = hub.append("general", "system", text)
+                    if result:
+                        publish_channel(client, "general", result["messages"])
+                hub.last_winner = winner
+            except (json.JSONDecodeError, AttributeError):
+                pass
             return
 
         try:
