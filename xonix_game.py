@@ -164,6 +164,11 @@ class MqttState:
         self.mode: dict[str, str] = {"p1": "auto", "p2": "auto"}
         self.control: str | None = None
         self.difficulty = "normal"
+        # Только для HUD (draw_hud) — "кто именно играет за бота", не влияет
+        # на саму логику движка (той стратегию/провайдера не сообщают, это
+        # знают только xonix_ai_agent.py/xonix_llm_strategist.py сами).
+        self.strategy: dict[str, str] = {"p1": "smart", "p2": "smart"}
+        self.llm_provider: dict[str, str] = {"p1": "off", "p2": "off"}
 
     def is_human(self, player: str) -> bool:
         with self.lock:
@@ -219,6 +224,14 @@ def on_mqtt_message(client, userdata, msg) -> None:
         elif topic == "xonix/game/difficulty" and payload in DIFFICULTY_PRESETS:
             mqtt_state.difficulty = payload
             mqtt_state.control = "restart"  # смена сложности на лету — новый раунд с новыми параметрами
+        elif topic == "xonix/game/p1/strategy_active" and payload in ("smart", "simple"):
+            mqtt_state.strategy["p1"] = payload
+        elif topic == "xonix/game/p2/strategy_active" and payload in ("smart", "simple"):
+            mqtt_state.strategy["p2"] = payload
+        elif topic == "xonix/game/p1/llm_provider" and payload in ("off", "haiku", "kimi"):
+            mqtt_state.llm_provider["p1"] = payload
+        elif topic == "xonix/game/p2/llm_provider" and payload in ("off", "haiku", "kimi"):
+            mqtt_state.llm_provider["p2"] = payload
 
 
 def start_mqtt() -> mqtt.Client:
@@ -234,6 +247,10 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/mode", qos=1)
     client.subscribe("xonix/game/control", qos=1)
     client.subscribe("xonix/game/difficulty", qos=1)
+    client.subscribe("xonix/game/p1/strategy_active", qos=0)
+    client.subscribe("xonix/game/p2/strategy_active", qos=0)
+    client.subscribe("xonix/game/p1/llm_provider", qos=0)
+    client.subscribe("xonix/game/p2/llm_provider", qos=0)
     client.loop_start()
     return client
 
@@ -444,8 +461,21 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     font = _get_hud_font()
     if font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
-    p1_text = f"Голубой {field.percent('p1'):.1f}%  побед: {wins['p1']}"
-    p2_text = f"Жёлтый {field.percent('p2'):.1f}%  побед: {wins['p2']}"
+    # Кто СЕЙЧАС реально держит игрока — человек (перехватил ходом с дашборда,
+    # см. IDLE_TIMEOUT в MqttState.is_human) или бот, и если бот — какой
+    # именно (простой/умный + LLM-стратег поверх, если включён) — по прямому
+    # запросу пользователя добавлено прямо в HUD, не только на дашборде.
+    def _who(player: str) -> str:
+        if mqtt_state.is_human(player):
+            return "человек"
+        strat = "умный" if mqtt_state.strategy[player] == "smart" else "простой"
+        provider = mqtt_state.llm_provider[player]
+        if provider == "off":
+            return f"бот: {strat}"
+        return f"бот: {strat}+{provider.capitalize()}"
+
+    p1_text = f"Голубой ({_who('p1')}) {field.percent('p1'):.1f}%  побед: {wins['p1']}"
+    p2_text = f"Жёлтый ({_who('p2')}) {field.percent('p2'):.1f}%  побед: {wins['p2']}"
 
     pad_x, pad_y, line_gap = 16, 10, 6
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
