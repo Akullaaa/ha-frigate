@@ -169,6 +169,8 @@ class MqttState:
         # знают только xonix_ai_agent.py/xonix_llm_strategist.py сами).
         self.strategy: dict[str, str] = {"p1": "smart", "p2": "smart"}
         self.llm_provider: dict[str, str] = {"p1": "off", "p2": "off"}
+        self.llm_usage: dict[str, dict] = {"p1": {}, "p2": {}}  # последний вызов: input/output/cached
+        self.llm_status: dict[str, str] = {"p1": "", "p2": ""}
 
     def is_human(self, player: str) -> bool:
         with self.lock:
@@ -232,6 +234,14 @@ def on_mqtt_message(client, userdata, msg) -> None:
             mqtt_state.llm_provider["p1"] = payload
         elif topic == "xonix/game/p2/llm_provider" and payload in ("off", "haiku", "kimi"):
             mqtt_state.llm_provider["p2"] = payload
+        elif topic in ("xonix/game/p1/llm_usage", "xonix/game/p2/llm_usage"):
+            player = "p1" if "p1" in topic else "p2"
+            try:
+                mqtt_state.llm_usage[player] = json.loads(payload)
+            except json.JSONDecodeError:
+                pass
+        elif topic in ("xonix/game/p1/llm_status", "xonix/game/p2/llm_status"):
+            mqtt_state.llm_status["p1" if "p1" in topic else "p2"] = payload
 
 
 def start_mqtt() -> mqtt.Client:
@@ -251,6 +261,10 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/strategy_active", qos=0)
     client.subscribe("xonix/game/p1/llm_provider", qos=0)
     client.subscribe("xonix/game/p2/llm_provider", qos=0)
+    client.subscribe("xonix/game/p1/llm_usage", qos=0)
+    client.subscribe("xonix/game/p2/llm_usage", qos=0)
+    client.subscribe("xonix/game/p1/llm_status", qos=0)
+    client.subscribe("xonix/game/p2/llm_status", qos=0)
     client.loop_start()
     return client
 
@@ -436,62 +450,85 @@ def upsample_mask(grid_bool: np.ndarray) -> np.ndarray:
     return np.repeat(np.repeat(grid_bool, CELL, axis=0), CELL, axis=1)
 
 
-_hud_font: ImageFont.FreeTypeFont | None = None
+_hud_fonts: dict[int, ImageFont.FreeTypeFont | bool] = {}
 
 
-def _get_hud_font() -> ImageFont.FreeTypeFont | None:
-    global _hud_font
-    if _hud_font is None:
+def _get_hud_font(size: int) -> ImageFont.FreeTypeFont | None:
+    cached = _hud_fonts.get(size)
+    if cached is None:
         try:
-            _hud_font = ImageFont.truetype(HUD_FONT_PATH, 18)
+            cached = ImageFont.truetype(HUD_FONT_PATH, size)
         except OSError:
-            _hud_font = False  # шрифта нет — не пытаться заново каждый кадр
-    return _hud_font or None
+            cached = False  # шрифта нет — не пытаться заново каждый кадр
+        _hud_fonts[size] = cached
+    return cached or None
+
+
+def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
+    """Основная строка (кто именно играет + процент + победы) плюс, если
+    это бот на LLM-стратеге, вторая строка со статистикой токенов
+    последнего запроса — по прямому запросу пользователя ("покажи больше
+    информации... какой именно ИИ работает и его статистику по токенам")."""
+    name = "Голубой" if player == "p1" else "Жёлтый"
+    if mqtt_state.is_human(player):
+        who = "человек"
+    else:
+        strat = "умный" if mqtt_state.strategy[player] == "smart" else "простой"
+        provider = mqtt_state.llm_provider[player]
+        who = f"бот: {strat}" if provider == "off" else f"бот: {strat}+{provider.capitalize()}"
+    lines = [f"{name} ({who}) {field.percent(player):.1f}%  побед: {wins[player]}"]
+
+    provider = mqtt_state.llm_provider[player]
+    if not mqtt_state.is_human(player) and provider != "off":
+        usage = mqtt_state.llm_usage[player]
+        if usage:
+            cached = usage.get("cached", 0)
+            cache_part = f", кэш {cached}" if cached else ""
+            lines.append(f"    {usage.get('input', '?')}/{usage.get('output', '?')} токенов{cache_part}")
+        else:
+            status = mqtt_state.llm_status[player] or "жду первый ответ…"
+            lines.append(f"    {status}")
+    return lines
 
 
 def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     """Полупрозрачный блок статистики ПРЯМО ПО ЦЕНТРУ канвы (и по горизонтали,
     и по вертикали — по прямой просьбе пользователя; раньше пробовали полосу
-    сверху, потом полосу по центру только по вертикали) — проценты территории
-    и счёт побед, двумя строками. По прямому запросу пользователя
-    ("информацию об успехах игроков... показывать в потоке в виде
-    полупрозрачного блока") — именно В ВИДЕОПОТОКЕ, не только на дашборде
-    HA, поэтому рисуется прямо на кадре. Полупрозрачность (не полностью
-    непрозрачная подложка) — чтобы не закрывать игровое поле под ней."""
-    font = _get_hud_font()
-    if font is None:
+    сверху, потом полосу по центру только по вертикали) — проценты территории,
+    счёт побед и (для ботов на LLM) статистика токенов последнего запроса.
+    По прямому запросу пользователя ("информацию об успехах игроков...
+    показывать в потоке в виде полупрозрачного блока") — именно В
+    ВИДЕОПОТОКЕ, не только на дашборде HA, поэтому рисуется прямо на кадре.
+    Полупрозрачность — чтобы не закрывать игровое поле под ней."""
+    font = _get_hud_font(18)
+    small_font = _get_hud_font(14)
+    if font is None or small_font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
-    # Кто СЕЙЧАС реально держит игрока — человек (перехватил ходом с дашборда,
-    # см. IDLE_TIMEOUT в MqttState.is_human) или бот, и если бот — какой
-    # именно (простой/умный + LLM-стратег поверх, если включён) — по прямому
-    # запросу пользователя добавлено прямо в HUD, не только на дашборде.
-    def _who(player: str) -> str:
-        if mqtt_state.is_human(player):
-            return "человек"
-        strat = "умный" if mqtt_state.strategy[player] == "smart" else "простой"
-        provider = mqtt_state.llm_provider[player]
-        if provider == "off":
-            return f"бот: {strat}"
-        return f"бот: {strat}+{provider.capitalize()}"
 
-    p1_text = f"Голубой ({_who('p1')}) {field.percent('p1'):.1f}%  побед: {wins['p1']}"
-    p2_text = f"Жёлтый ({_who('p2')}) {field.percent('p2'):.1f}%  побед: {wins['p2']}"
+    p1_lines = _player_hud_lines("p1", field, wins)
+    p2_lines = _player_hud_lines("p2", field, wins)
+    rows: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int]]] = []
+    rows.append((p1_lines[0], font, (0, 200, 255, 255)))
+    rows += [(t, small_font, (0, 200, 255, 200)) for t in p1_lines[1:]]
+    rows.append((p2_lines[0], font, (255, 200, 0, 255)))
+    rows += [(t, small_font, (255, 200, 0, 200)) for t in p2_lines[1:]]
 
-    pad_x, pad_y, line_gap = 16, 10, 6
+    pad_x, pad_y, line_gap = 16, 10, 5
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    p1_w = tmp.textlength(p1_text, font=font)
-    p2_w = tmp.textlength(p2_text, font=font)
-    line_h = font.size + 4
-    box_w = int(max(p1_w, p2_w)) + pad_x * 2
-    box_h = line_h * 2 + line_gap + pad_y * 2
+    widths = [tmp.textlength(text, font=f) for text, f, _ in rows]
+    heights = [f.size + 4 for _, f, _ in rows]
+    box_w = int(max(widths)) + pad_x * 2
+    box_h = sum(heights) + line_gap * (len(rows) - 1) + pad_y * 2
 
     x0 = (CANVAS_W - box_w) // 2
     y0 = (CANVAS_H - box_h) // 2
     block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(block)
     draw.rectangle([0, 0, box_w, box_h], fill=(0, 0, 0, 130))
-    draw.text((pad_x, pad_y), p1_text, font=font, fill=(0, 200, 255, 255))
-    draw.text((pad_x, pad_y + line_h + line_gap), p2_text, font=font, fill=(255, 200, 0, 255))
+    y = pad_y
+    for (text, f, color), h in zip(rows, heights):
+        draw.text((pad_x, y), text, font=f, fill=color)
+        y += h + line_gap
 
     block_rgba = np.array(block, dtype=np.float32)
     alpha = block_rgba[:, :, 3:4] / 255.0
