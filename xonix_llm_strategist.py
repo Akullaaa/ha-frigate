@@ -209,7 +209,7 @@ class Shared:
 def _format_log(entries: list[dict], limit: int) -> str:
     if not entries:
         return "(пока пусто)"
-    who = {"user": "Пользователь", "claude": "Алёна (эксперт)", "p1": "Бот 1", "p2": "Бот 2", "system": "Система"}
+    who = {"user": "Пользователь", "claude": "Алёна (эксперт)", "p1": "Голубой", "p2": "Жёлтый", "system": "Система"}
     lines = []
     for m in entries[-limit:]:
         if m.get("kind") == "status":

@@ -166,8 +166,8 @@ def main() -> None:
         if hub.last_state and (t0 - hub.last_status_post_ts) > STATUS_INTERVAL:
             s = hub.last_state
             text = (
-                f"Игрок 1: {s.get('p1_percent', '?')}% · "
-                f"Игрок 2: {s.get('p2_percent', '?')}% · "
+                f"Голубой: {s.get('p1_percent', '?')}% · "
+                f"Жёлтый: {s.get('p2_percent', '?')}% · "
                 f"сложность {s.get('difficulty', '?')} · цель {s.get('target_percent', '?')}% · "
                 f"фаза {s.get('phase', '?')}"
             )
