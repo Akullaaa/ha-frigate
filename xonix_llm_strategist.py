@@ -57,7 +57,15 @@ import time
 import urllib.error
 import urllib.request
 
+import numpy as np
 import paho.mqtt.client as mqtt
+
+# Коды клеток из xonix_game.py (там же EMPTY, P1_TERRITORY и т.д.) — не
+# импортируем модуль напрямую (отдельный процесс, своя точка входа
+# main()), а просто держим ту же кодировку здесь, значения не меняются.
+EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
+TERRITORY_OF = {"p1": P1_TERRITORY, "p2": P2_TERRITORY}
+TRAIL_OF = {"p1": P1_TRAIL, "p2": P2_TRAIL}
 
 MQTT_HOST = "core-mosquitto"
 MQTT_PORT = 1883
@@ -360,6 +368,49 @@ def _format_log(entries: list[dict], limit: int) -> str:
     return "\n".join(lines) if lines else "(пока пусто)"
 
 
+def _grid_features(player: str, opp: str, board: dict, my_cursor) -> list[str]:
+    """Посчитанные (не сырые!) признаки по полной сетке поля — специально
+    БЕЗ передачи самой сетки в промпт: 3600 клеток текстом — это шум, а не
+    сигнал (LLM плохо разбирает точную 2D-геометрию по символьному дампу),
+    и как раз она меняется каждый цикл, то есть никогда не кэшируется —
+    добавлять её значит платить за токены без пользы и без кэша. Вместо
+    этого декодируем grid здесь, в Python, и отдаём уже готовые числа:
+    размер фронта для лёгкого расширения, длина границы с соперником и
+    риск наступить на собственный след (тот самый баг с самоубийствами
+    бота — эвристика его не видит, а тут хотя бы стратег может понизить
+    aggression/приказать defend, если увидит опасность заранее)."""
+    grid_hex = board.get("grid")
+    gw, gh = board.get("grid_w"), board.get("grid_h")
+    if not grid_hex or not gw or not gh:
+        return []
+    try:
+        grid = np.frombuffer(bytes.fromhex(grid_hex), dtype=np.uint8).reshape(gw, gh)
+    except ValueError:
+        return []
+
+    my_territory = grid == TERRITORY_OF[player]
+    opp_territory = grid == TERRITORY_OF[opp]
+    empty = grid == EMPTY
+    xs, ys = np.where(my_territory)
+    frontier = border = 0
+    for x, y in zip(xs.tolist(), ys.tolist()):
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if 0 <= nx < gw and 0 <= ny < gh:
+                if empty[nx, ny]:
+                    frontier += 1
+                elif opp_territory[nx, ny]:
+                    border += 1
+
+    parts = [f"фронт для расширения: {frontier} клеток", f"граница с соперником: {border} клеток"]
+    if my_cursor:
+        cx, cy = int(my_cursor[0]), int(my_cursor[1])
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            if 0 <= nx < gw and 0 <= ny < gh and grid[nx, ny] == TRAIL_OF[player]:
+                parts.append("ОСТОРОЖНО: рядом свой же след, шаг в его сторону убьёт")
+                break
+    return parts
+
+
 def _board_summary(player: str, opp: str, board: dict) -> str:
     """Сводка по xonix/game/board (та же сырая доска, что читает быстрая
     эвристика xonix_ai_agent.py) — раньше LLM-стратег её вообще не видел,
@@ -385,6 +436,7 @@ def _board_summary(player: str, opp: str, board: dict) -> str:
     if my_cursor and opp_cursor:
         odist = math.hypot(opp_cursor[0] - my_cursor[0], opp_cursor[1] - my_cursor[1])
         parts.append(f"соперник в {odist:.1f} клетках")
+    parts.extend(_grid_features(player, opp, board, my_cursor))
     return "; ".join(parts)
 
 
