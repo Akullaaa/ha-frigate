@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """Третий, самый медленный уровень управления ботом — НЕ решает ходы (это
 делает xonix_ai_agent.py каждые 0.25с), а раз в DECIDE_INTERVAL секунд
-спрашивает настоящую LLM "как в целом сейчас играть" и публикует
-числовые веса (агрессия/осторожность), которые быстрая эвристика
-подмешивает в свою обычную оценку хода. Текст-"характер" бота
-(xonix/game/p{N}/persona, редактируется с дашборда — mqtt: text:)
-передаётся LLM как есть при каждом вызове.
+спрашивает настоящую LLM "как в целом сейчас играть" и публикует:
+- числовые веса (aggression/caution) — как и раньше, подмешиваются в оценку
+  хода эвристики;
+- order (expand/raid/defend/regroup) — НАСТОЯЩИЙ новый канал управления:
+  xonix_ai_agent.py реально меняет по нему поведение (дальность и
+  агрессивность набегов), это не просто текст поверх старого механизма;
+- private_message — приказ своему боту человеческим текстом, публикуется в
+  приватный канал чата (xonix_chat_hub.py, private_p{N}) — виден только
+  пользователю и самому этому стратегу, LLM другого игрока его не видит
+  (физически не подписана на этот топик);
+- general_message — необязательная реплика в ОБЩИЙ чат (пользователь + оба
+  LLM-стратега), пусто, если сказать нечего — не спамим партию раз в 20с.
+
+Текст-"характер" бота (xonix/game/p{N}/persona, редактируется с дашборда —
+mqtt: text:) передаётся LLM как есть при каждом вызове, плюс свежий срез
+обоих каналов чата (xonix_chat_hub.py) как разговорный контекст.
 
 Почему не решает ходы напрямую: LLM отвечает секунду-другую, ходы нужны
 4 раза в секунду — на порядок быстрее. Вместо этого LLM управляет
-"характером" эвристики, а не заменяет её.
+"характером" эвристики (через order/aggression/caution), а не заменяет её.
 
 Два провайдера на выбор (xonix/game/p{N}/llm_provider — off/haiku/kimi,
 переключается на лету; именно "off", не "none" — последнее зарезервировано
@@ -34,7 +45,6 @@ MQTT-интеграцией HA как сентинел "нет значения"
 import argparse
 import hashlib
 import json
-import math
 import threading
 import time
 import urllib.error
@@ -53,14 +63,30 @@ STATE_STALE_TIMEOUT = 30.0  # если xonix/game/state молчит дольш�
 ANTHROPIC_KEY_PATH = "/config/device_credentials/anthropic_api_key.txt"
 MOONSHOT_KEY_PATH = "/config/device_credentials/moonshot_api_key.txt"
 
+ORDERS = ("expand", "raid", "defend", "regroup")
+
 SYSTEM_PROMPT_TEMPLATE = (
-    "Ты определяешь общую стратегию бота в игре захвата территории "
-    "(упрощённый Ксоникс, общее поле на двоих, можно захватывать и уже "
-    "занятую территорию соперника, а не только нейтральную). "
+    "Ты управляешь ботом в игре захвата территории (упрощённый Ксоникс, "
+    "общее поле на двоих, можно захватывать и уже занятую территорию "
+    "соперника, а не только нейтральную). Ходы делает быстрая эвристика "
+    "у тебя в подчинении — ты не решаешь каждый ход, а раз в ~20 секунд "
+    "задаёшь ей общий приказ и настройки. "
     "Характер бота, заданный пользователем: \"{persona}\"\n\n"
+    "Тебе показывают срез общего чата партии (пользователь + оба бота) и "
+    "твою собственную переписку со своим ботом — учитывай их как контекст, "
+    "если это уместно.\n\n"
     "Отвечай СТРОГО одним JSON-объектом, без пояснений и без markdown-"
-    "разметки: {{\"aggression\": <0..1>, \"caution\": <0..1>, "
-    "\"note\": \"<до 12 слов по-русски, что сейчас важно и почему>\"}}\n"
+    "разметки:\n"
+    "{{\"order\": \"expand\"|\"raid\"|\"defend\"|\"regroup\", "
+    "\"aggression\": <0..1>, \"caution\": <0..1>, "
+    "\"private_message\": \"<до 20 слов по-русски — приказ своему боту, "
+    "всегда непустой>\", "
+    "\"general_message\": \"<до 20 слов по-русски — реплика в общий чат, "
+    "или пустая строка, если сказать нечего>\"}}\n"
+    "order: expand — обычная игра (баланс набегов и возврата); "
+    "raid — дальние агрессивные набеги на территорию соперника; "
+    "defend — короткие вылазки, быстрый возврат, минимум риска; "
+    "regroup — почти не уходить с территории, переждать.\n"
     "aggression — насколько активно вторгаться на территорию соперника "
     "(0 = никогда, 1 = искать любую возможность).\n"
     "caution — насколько сильно избегать шариков и соперника "
@@ -117,7 +143,7 @@ def call_kimi(api_key: str, system_prompt: str, user_prompt: str) -> str:
         "temperature": 1,  # эта модель принимает только 1, см. алёна.md
         # Ризонинг-модель: часть токенов уходит в скрытые reasoning_content
         # ДО финального ответа (проверено вживую — 200 не хватало, ответ
-        # обрывался пустым при finish_reason="length"; 1000 хватает с запасом).
+        # обрывался пустым при finish_reason="length"; 1200 хватает с запасом).
         "max_tokens": 1200,
         "prompt_cache_key": stable_cache_key(system_prompt, model),
         "messages": [
@@ -153,7 +179,20 @@ def parse_llm_json(text: str) -> dict | None:
         caution = max(0.0, min(1.0, float(obj.get("caution", 0.5))))
     except (TypeError, ValueError):
         return None
-    return {"aggression": aggression, "caution": caution, "note": str(obj.get("note", ""))[:200]}
+    order = str(obj.get("order", "expand")).strip()
+    if order not in ORDERS:
+        order = "expand"
+    private_message = str(obj.get("private_message", "")).strip()[:300]
+    if not private_message:
+        private_message = "Продолжай как раньше."
+    general_message = str(obj.get("general_message", "")).strip()[:300]
+    return {
+        "order": order,
+        "aggression": aggression,
+        "caution": caution,
+        "private_message": private_message,
+        "general_message": general_message,
+    }
 
 
 class Shared:
@@ -163,19 +202,36 @@ class Shared:
         self.persona = "Играй сбалансированно — не слишком рискованно, не слишком пассивно."
         self.last_state_ts: float | None = None
         self.state: dict = {}
-        self.board_summary = ""  # заполняется из board, компактно
+        self.general_log: list[dict] = []
+        self.private_log: list[dict] = []
+
+
+def _format_log(entries: list[dict], limit: int) -> str:
+    if not entries:
+        return "(пока пусто)"
+    who = {"user": "Пользователь", "claude": "Алёна (эксперт)", "p1": "Бот 1", "p2": "Бот 2", "system": "Система"}
+    lines = []
+    for m in entries[-limit:]:
+        if m.get("kind") == "status":
+            continue
+        lines.append(f"{who.get(m.get('sender'), m.get('sender'))}: {m.get('text', '')}")
+    return "\n".join(lines) if lines else "(пока пусто)"
 
 
 def build_user_prompt(player: str, shared: Shared) -> str:
     opp = "p2" if player == "p1" else "p1"
     with shared.lock:
         s = shared.state
+        general_log = list(shared.general_log)
+        private_log = list(shared.private_log)
     my_pct = s.get(f"{player}_percent", "?")
     opp_pct = s.get(f"{opp}_percent", "?")
     difficulty = s.get("difficulty", "?")
     return (
         f"Моя территория: {my_pct}%, территория соперника: {opp_pct}%, "
-        f"сложность: {difficulty}."
+        f"сложность: {difficulty}.\n\n"
+        f"Общий чат партии (последние сообщения):\n{_format_log(general_log, 8)}\n\n"
+        f"Твоя переписка со своим ботом (последние сообщения):\n{_format_log(private_log, 5)}"
     )
 
 
@@ -203,6 +259,18 @@ def main() -> None:
         elif msg.topic == f"xonix/game/{player}/persona":
             with shared.lock:
                 shared.persona = msg.payload.decode("utf-8", errors="ignore").strip() or shared.persona
+        elif msg.topic == "xonix/chat/log/general":
+            try:
+                with shared.lock:
+                    shared.general_log = json.loads(msg.payload).get("messages", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        elif msg.topic == f"xonix/chat/log/private_{player}":
+            try:
+                with shared.lock:
+                    shared.private_log = json.loads(msg.payload).get("messages", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
 
     client = mqtt.Client()
     client.username_pw_set(MQTT_USER, MQTT_PASS)
@@ -211,6 +279,10 @@ def main() -> None:
     client.subscribe("xonix/game/state", qos=0)
     client.subscribe(f"xonix/game/{player}/llm_provider", qos=1)
     client.subscribe(f"xonix/game/{player}/persona", qos=1)
+    client.subscribe("xonix/chat/log/general", qos=0)
+    # ТОЛЬКО свой приватный канал — чужой этот процесс физически не видит,
+    # именно так и обеспечена приватность приказов (см. докстринг файла).
+    client.subscribe(f"xonix/chat/log/private_{player}", qos=0)
     client.loop_start()
 
     anthropic_key = read_key(ANTHROPIC_KEY_PATH)
@@ -252,8 +324,23 @@ def main() -> None:
                 if text is not None:
                     params = parse_llm_json(text)
                     if params is not None:
-                        client.publish(f"xonix/game/{player}/llm_params", json.dumps(params), qos=0, retain=True)
+                        client.publish(
+                            f"xonix/game/{player}/llm_params",
+                            json.dumps({"order": params["order"], "aggression": params["aggression"], "caution": params["caution"]}),
+                            qos=0, retain=True,
+                        )
                         client.publish(f"xonix/game/{player}/llm_status", "ok", qos=0, retain=True)
+                        client.publish(
+                            f"xonix/chat/post/{player}",
+                            json.dumps({"channel": "private", "text": params["private_message"]}, ensure_ascii=False),
+                            qos=1,
+                        )
+                        if params["general_message"]:
+                            client.publish(
+                                f"xonix/chat/post/{player}",
+                                json.dumps({"channel": "general", "text": params["general_message"]}, ensure_ascii=False),
+                                qos=1,
+                            )
                     else:
                         client.publish(f"xonix/game/{player}/llm_status", f"не разобрал ответ: {text[:150]}", qos=0, retain=True)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, RuntimeError) as e:

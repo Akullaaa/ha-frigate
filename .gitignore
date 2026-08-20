@@ -10,3 +10,7 @@
 model_cache/
 __pycache__/
 go2rtc-tv-bin
+
+# Runtime-история чата Ксоникса (xonix_chat_hub.py) — пересоздаётся с нуля,
+# не версионируем, как и остальное runtime-состояние выше
+xonix_chat_history.json

@@ -17,6 +17,11 @@
 # — простаивают без единого вызова API, пока не выбран провайдер с дашборда.
 # Тот же trap их тоже убивает.
 #
+# Плюс xonix_chat_hub.py — единственный писатель истории трёхстороннего
+# чата (пользователь + оба LLM-стратега), см. его докстринг. Без него
+# xonix_llm_strategist.py просто не видит чат (подписан на топики chat/log/*,
+# которые пишет только хаб) — молча работает без контекста чата, не падает.
+#
 # Заведён как go2rtc exec-источник — см. go2rtc.streams.xonix_game в
 # config.yaml.
 set -e
@@ -31,9 +36,11 @@ python3 /config/xonix_llm_strategist.py p1 &
 LLM_P1=$!
 python3 /config/xonix_llm_strategist.py p2 &
 LLM_P2=$!
+python3 /config/xonix_chat_hub.py &
+CHAT_HUB=$!
 
 cleanup() {
-  kill "$AGENT_P1" "$AGENT_P2" "$LLM_P1" "$LLM_P2" 2>/dev/null || true
+  kill "$AGENT_P1" "$AGENT_P2" "$LLM_P1" "$LLM_P2" "$CHAT_HUB" 2>/dev/null || true
 }
 trap cleanup EXIT
 

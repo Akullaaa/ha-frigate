@@ -26,11 +26,17 @@ xonix/game/p{N}/strategy (retained), агент подписан и перекл
 
 Третий, необязательный уровень — xonix_llm_strategist.py: раз в ~20с
 спрашивает настоящую LLM (Claude Haiku / Kimi) "как в целом играть" по
-тексту-"характеру" от пользователя и публикует в xonix/game/p{N}/llm_params
+тексту-"характеру" от пользователя (плюс контекст общего и своего приватного
+чата — см. xonix_chat_hub.py) и публикует в xonix/game/p{N}/llm_params
 веса aggression/caution — strategy_smart их читает и подмешивает в свою
 обычную одношаговую оценку (не подменяет её — LLM слишком медленная для
 решения каждого хода). По умолчанию весов нет, эвристика работает как
 раньше (0.5/0.5 — нейтрально).
+
+Плюс "order" (expand/raid/defend/regroup) в том же llm_params — НАСТОЯЩИЙ
+канал управления, не просто текст: меняет дальность/длительность набегов
+и вес бонуса за вторжение на чужую территорию (см. ORDER_PARAMS ниже).
+По умолчанию "expand" — воспроизводит поведение ДО появления order.
 """
 import argparse
 import json
@@ -79,9 +85,9 @@ class BoardState:
         self.last_update_ts: float | None = None
         # веса от xonix_llm_strategist.py (третий, медленный уровень — не решает
         # ходы, только настраивает "характер" быстрой эвристики раз в ~20с).
-        # 0.5/0.5 — нейтральные значения, воспроизводящие поведение ДО того, как
-        # эта настройка появилась (обратная совместимость по умолчанию).
-        self.llm_params = {"aggression": 0.5, "caution": 0.5}
+        # 0.5/0.5/"expand" — нейтральные значения, воспроизводящие поведение
+        # ДО того, как эта настройка появилась (обратная совместимость).
+        self.llm_params = {"aggression": 0.5, "caution": 0.5, "order": "expand"}
 
     def update(self, msg: dict) -> None:
         with self.lock:
@@ -145,13 +151,26 @@ def strategy_simple(player: str, board: BoardState) -> str:
     return max(candidates)[1]
 
 
-def _pick_raid_target(grid, gw, gh, cx, cy, balls):
+# Приказ (order) от xonix_llm_strategist.py — НАСТОЯЩИЙ канал управления:
+# дальность/длительность набега и вес бонуса за вторжение на чужую
+# территорию реально меняются, это не просто текст поверх старого
+# механизма. "expand" воспроизводит поведение ДО появления order.
+ORDER_PARAMS = {
+    "expand": {"dist_range": (8, 20), "max_raid_len_mult": 1.0, "invasion_bonus_mult": 1.0},
+    "raid": {"dist_range": (12, 28), "max_raid_len_mult": 1.4, "invasion_bonus_mult": 1.6},
+    "defend": {"dist_range": (4, 10), "max_raid_len_mult": 0.6, "invasion_bonus_mult": 0.5},
+    "regroup": {"dist_range": (3, 7), "max_raid_len_mult": 0.4, "invasion_bonus_mult": 0.2},
+}
+
+
+def _pick_raid_target(grid, gw, gh, cx, cy, balls, dist_range=(8, 20)):
+    lo, hi = dist_range
     best_pt, best_safety = None, -1e9
     for _ in range(20):
         tx = random.randint(1, gw - 2)
         ty = random.randint(1, gh - 2)
         dist = math.hypot(cx - tx, cy - ty)
-        if grid[tx, ty] != EMPTY or dist < 8 or dist > 20:
+        if grid[tx, ty] != EMPTY or dist < lo or dist > hi:
             continue
         safety = min((math.hypot(bx - tx, by - ty) for bx, by in balls), default=99.0)
         if safety > best_safety:
@@ -176,17 +195,22 @@ def strategy_smart(player: str, board: BoardState) -> str:
     trailing = trail_len[player] > 0
     exiting = not trailing
 
+    llm = board.llm_params
+    aggression = llm.get("aggression", 0.5)
+    caution_factor = 0.5 + llm.get("caution", 0.5)  # 0.5 (беспечно) .. 1.5 (осторожно), 1.0 = как раньше
+    order_params = ORDER_PARAMS.get(llm.get("order", "expand"), ORDER_PARAMS["expand"])
+
     if exiting:
         board.raid_target = None
     else:
         target = board.raid_target
         if target is None:
-            target = _pick_raid_target(grid, gw, gh, cx, cy, balls)
+            target = _pick_raid_target(grid, gw, gh, cx, cy, balls, order_params["dist_range"])
             board.raid_target = target
         if target is not None:
             tx, ty = target
             reached = math.hypot(cx - tx, cy - ty) < 2
-            too_long = trail_len[player] > MAX_RAID_LEN
+            too_long = trail_len[player] > MAX_RAID_LEN * order_params["max_raid_len_mult"]
             if reached or too_long:
                 board.raid_target = None
 
@@ -194,10 +218,6 @@ def strategy_smart(player: str, board: BoardState) -> str:
     heading_home = trailing and target is None
     prev_dir = last_dir.get(player, "right")
     opp_territory = TERRITORY_OF[opp]
-
-    llm = board.llm_params
-    aggression = llm.get("aggression", 0.5)
-    caution_factor = 0.5 + llm.get("caution", 0.5)  # 0.5 (беспечно) .. 1.5 (осторожно), 1.0 = как раньше
 
     best_d, best_score = prev_dir, -1e9
     for d, (dx, dy) in DIRS.items():
@@ -217,8 +237,10 @@ def strategy_smart(player: str, board: BoardState) -> str:
             score -= (3 - odist) * 1.0 * caution_factor
         if grid[nx, ny] == opp_territory:
             # LLM-настройка "агрессии" — насколько охотно лезть на чужую
-            # землю сверх того, что и так подскажет обычная жадная оценка
-            score += aggression * 3.0
+            # землю сверх того, что и так подскажет обычная жадная оценка;
+            # order масштабирует этот бонус отдельно (raid усиливает,
+            # defend/regroup гасят — реальный эффект приказа, не просто note)
+            score += aggression * 3.0 * order_params["invasion_bonus_mult"]
 
         if exiting:
             xs, ys = np.where(grid == EMPTY)
@@ -273,6 +295,8 @@ def main() -> None:
                 params = json.loads(msg.payload)
                 board.llm_params["aggression"] = float(params.get("aggression", 0.5))
                 board.llm_params["caution"] = float(params.get("caution", 0.5))
+                order = str(params.get("order", "expand"))
+                board.llm_params["order"] = order if order in ORDER_PARAMS else "expand"
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
