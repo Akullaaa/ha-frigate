@@ -381,7 +381,10 @@ def main() -> None:
                         if params["general_message"]:
                             client.publish(
                                 f"xonix/chat/post/{player}",
-                                json.dumps({"channel": "general", "text": params["general_message"]}, ensure_ascii=False),
+                                json.dumps(
+                                    {"channel": "general", "text": params["general_message"], "usage": {"provider": provider, **usage}},
+                                    ensure_ascii=False,
+                                ),
                                 qos=1,
                             )
                     else:
