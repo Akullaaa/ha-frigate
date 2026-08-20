@@ -49,7 +49,7 @@ IDLE_TIMEOUT = 8.0
 NUM_BALLS = 3
 BALL_SPEED_MIN, BALL_SPEED_MAX = 0.12, 0.22
 TARGET_PERCENT = 75.0
-MAX_RAID_LEN = 60  # клеток следа, после которых бот начинает возвращаться
+MAX_RAID_LEN = 30  # клеток следа, после которых бот начинает возвращаться, даже не дойдя до цели
 
 EMPTY, TERRITORY, TRAIL = 0, 1, 2
 
@@ -212,6 +212,7 @@ class Half:
         self.trail: list[tuple[int, int]] = []
         self.balls = [Ball() for _ in range(NUM_BALLS)]
         self.raid_len = 0
+        self.raid_target: tuple[int, int] | None = None
 
     def percent(self) -> float:
         total = GRID_W * GRID_H
@@ -243,6 +244,7 @@ class Half:
             self.grid[tx, ty] = EMPTY
         self.trail = []
         self.raid_len = 0
+        self.raid_target = None  # старая цель могла остаться за пределами нового спавна
         xs, ys = np.where(self.grid == TERRITORY)
         i = random.randrange(len(xs))
         self.cursor = (int(xs[i]), int(ys[i]))
@@ -275,30 +277,58 @@ class Half:
                     for (cx, cy) in component:
                         self.grid[cx, cy] = TERRITORY
 
+    def _pick_raid_target(self) -> tuple[int, int] | None:
+        """Цель набега: случайные точки по всему полю, СРЕДИ НЕЗАНЯТЫХ
+        клеток (раньше цель могла попасть на уже свою территорию — бот её
+        тут же "достигал", не начиная след, и застревал навсегда, гоняясь
+        за той же неактуальной точкой). Из подходящих — самая безопасная
+        (дальше всего от шариков на момент выбора). None, если незанятых
+        клеток рядом не нашлось (поле почти всё занято)."""
+        cx, cy = self.cursor
+        best_pt, best_safety = None, -1e9
+        for _ in range(20):
+            tx = random.randint(1, GRID_W - 2)
+            ty = random.randint(1, GRID_H - 2)
+            if self.grid[tx, ty] != EMPTY or math.hypot(cx - tx, cy - ty) < 3:
+                continue
+            safety = min((math.hypot(b.x - tx, b.y - ty) for b in self.balls), default=99.0)
+            if safety > best_safety:
+                best_safety, best_pt = safety, (tx, ty)
+        return best_pt
+
     def ai_direction(self) -> str:
         cx, cy = self.cursor
-        on_territory = self.grid[cx, cy] == TERRITORY
+        if self.raid_target is not None:
+            tx, ty = self.raid_target
+            reached = math.hypot(cx - tx, cy - ty) < 2
+            too_long = bool(self.trail) and self.raid_len > MAX_RAID_LEN
+            if reached or too_long:
+                self.raid_target = None  # цель достигнута/след слишком длинный — пора домой
+        if self.raid_target is None and not self.trail:
+            self.raid_target = self._pick_raid_target()  # может остаться None, если поле почти занято
+
+        heading_home = bool(self.trail) and self.raid_target is None
+
         best_d, best_score = self.last_dir, -1e9
         for d, (dx, dy) in DIRS.items():
-            if len(self.trail) > 0 and d == OPPOSITE[self.last_dir]:
+            if self.trail and d == OPPOSITE[self.last_dir]:
                 continue
             nx, ny = cx + dx, cy + dy
             if nx < 0 or ny < 0 or nx >= GRID_W or ny >= GRID_H:
                 continue
-            score = random.uniform(0, 1) * 0.3
+            score = random.uniform(0, 1) * 0.2
             for b in self.balls:
                 dist = math.hypot(b.x - nx, b.y - ny)
-                if dist < 4:
-                    score -= (4 - dist) * 2
-            if on_territory and len(self.trail) == 0:
-                if self.grid[nx, ny] == EMPTY:
-                    score += 1.0
+                if dist < 6:
+                    score -= (6 - dist) * 2.5
+            if heading_home or self.raid_target is None:
+                xs, ys = np.where(self.grid == TERRITORY)
+                dists = (xs - nx) ** 2 + (ys - ny) ** 2
+                nearest = dists.min() if len(dists) else 1e9
+                score += 4.0 / (1.0 + nearest)
             else:
-                if self.raid_len > MAX_RAID_LEN:
-                    xs, ys = np.where(self.grid == TERRITORY)
-                    dists = (xs - nx) ** 2 + (ys - ny) ** 2
-                    nearest = dists.min() if len(dists) else 1e9
-                    score += 3.0 / (1.0 + nearest)
+                tx, ty = self.raid_target
+                score += 2.0 / (1.0 + math.hypot(nx - tx, ny - ty))
             if score > best_score:
                 best_score, best_d = score, d
         return best_d
