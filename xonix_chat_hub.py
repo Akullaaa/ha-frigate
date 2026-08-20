@@ -68,6 +68,7 @@ class Hub:
         self.history: dict[str, list[dict]] = {c: [] for c in CHANNELS}
         self._load()
         self.last_state_ts: float | None = None
+        self._ack_toggle = False  # чередование "" / ZWSP, см. клиринг поля ввода
 
     def _load(self) -> None:
         try:
@@ -136,10 +137,21 @@ def main() -> None:
                 # Поле ввода на дашборде без state_topic держит на экране
                 # то, что было набрано, — повторный Enter с тем же текстом
                 # ничего не публикует (HA не видит изменения, выглядит как
-                # "отправка не работает"). Ставим пустую строку в отдельный
-                # state_topic поля сразу после обработки — поле визуально
-                # очищается, как в обычном чате.
-                client.publish("xonix/chat/ui/general_send_ack", "", qos=0, retain=False)
+                # "отправка не работает"). Публикуем "квиток" в отдельный
+                # state_topic поля сразу после обработки, чтобы поле
+                # визуально очищалось. Статичная "" тут не работает —
+                # проверено вживую дважды: (1) сама "" — после первой же
+                # очистки состояние и так уже "", повторные публикации
+                # той же строки HA не рассылает фронтенду вообще;
+                # (2) value_template, всегда возвращающий "" — тоже не
+                # спасает, HA дедуплицирует по ОТРЕНДЕРЕННОМУ значению, не
+                # по сырому payload'у, так что разные payload с одинаковым
+                # шаблонным результатом всё равно схлопываются в no-op.
+                # Рабочий вариант — чередовать ДВЕ РАЗНЫЕ, но одинаково
+                # невидимые строки: "" и zero-width space (U+200B).
+                hub._ack_toggle = not hub._ack_toggle
+                ack_payload = "​" if hub._ack_toggle else ""
+                client.publish("xonix/chat/ui/general_send_ack", ack_payload, qos=0, retain=False)
         elif msg.topic == "xonix/chat/post/p1":
             sender = "p1"
             channel = "private_p1" if channel_hint == "private" else "general"
