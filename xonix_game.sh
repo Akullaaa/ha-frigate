@@ -13,7 +13,7 @@
 #
 # Плюс (третий уровень) — два процесса xonix_llm_strategist.py, по одному
 # на игрока: раз в ~20с спрашивают настоящую LLM и тюнят параметры
-# xonix_ai_agent.py (xonix/game/p{N}/llm_params). По умолчанию provider=none
+# xonix_ai_agent.py (xonix/game/p{N}/llm_params). По умолчанию provider=off
 # — простаивают без единого вызова API, пока не выбран провайдер с дашборда.
 # Тот же trap их тоже убивает.
 #

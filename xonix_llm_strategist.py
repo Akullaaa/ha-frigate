@@ -11,10 +11,12 @@
 4 раза в секунду — на порядок быстрее. Вместо этого LLM управляет
 "характером" эвристики, а не заменяет её.
 
-Два провайдера на выбор (xonix/game/p{N}/llm_provider — none/haiku/kimi,
-переключается на лету):
+Два провайдера на выбор (xonix/game/p{N}/llm_provider — off/haiku/kimi,
+переключается на лету; именно "off", не "none" — последнее зарезервировано
+MQTT-интеграцией HA как сентинел "нет значения" и ломает отображение select,
+проверено вживую 2026-08-20):
 - haiku — Claude Haiku 4.5, ключ из device_credentials/anthropic_api_key.txt
-  (пока нет файла — просто пропускает вызовы, как provider=none).
+  (нет файла — просто пропускает вызовы, как provider=off).
 - kimi  — тот же Moonshot-ключ, что уже используется для Roo Code
   (device_credentials/moonshot_api_key.txt), НАПРЯМУЮ к api.moonshot.ai —
   локальный кэш-прокси на порту 8124 живёт в ДРУГОМ контейнере
@@ -23,7 +25,7 @@
   Вместо прокси — тот же приём кэширования (стабильный prompt_cache_key
   по хэшу системного промпта) реализован здесь напрямую.
 
-По умолчанию provider=none — ни одного вызова API, ни одной копейки,
+По умолчанию provider=off — ни одного вызова API, ни одной копейки,
 пока пользователь явно не выберет провайдера с дашборда.
 
 Раздельные ключи и креды — по запросу пользователя, не хранить/угадывать
@@ -157,7 +159,7 @@ def parse_llm_json(text: str) -> dict | None:
 class Shared:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.provider = "none"
+        self.provider = "off"
         self.persona = "Играй сбалансированно — не слишком рискованно, не слишком пассивно."
         self.last_state_ts: float | None = None
         self.state: dict = {}
@@ -195,7 +197,7 @@ def main() -> None:
                 pass
         elif msg.topic == f"xonix/game/{player}/llm_provider":
             payload = msg.payload.decode("utf-8", errors="ignore").strip()
-            if payload in ("none", "haiku", "kimi"):
+            if payload in ("off", "haiku", "kimi"):
                 with shared.lock:
                     shared.provider = payload
         elif msg.topic == f"xonix/game/{player}/persona":
@@ -230,7 +232,7 @@ def main() -> None:
             provider = shared.provider
             persona = shared.persona
 
-        if provider != "none" and last_state_ts is not None:
+        if provider != "off" and last_state_ts is not None:
             system_prompt = SYSTEM_PROMPT_TEMPLATE.format(persona=persona)
             user_prompt = build_user_prompt(player, shared)
             try:
