@@ -42,6 +42,8 @@ MQTT_PASS = "qqqqqqq7"
 
 MAX_RAID_LEN = 30
 DECIDE_PERIOD = 0.25  # держим темп публикации ходов в шаге с публикацией board у движка
+STARTUP_GRACE = 30.0  # сколько ждать первую board, прежде чем считать движок не запустившимся
+BOARD_STALE_TIMEOUT = 20.0  # board публикуется раз в 0.25с — 20с тишины = движок точно мёртв
 
 EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
 TERRITORY_OF = {"p1": P1_TERRITORY, "p2": P2_TERRITORY}
@@ -66,6 +68,7 @@ class BoardState:
         self.last_dir: dict[str, str] = {}
         self.balls: list[tuple[float, float]] = []
         self.raid_target: tuple[int, int] | None = None  # состояние стратегии "smart", живёт тут в агенте
+        self.last_update_ts: float | None = None
 
     def update(self, msg: dict) -> None:
         with self.lock:
@@ -77,6 +80,20 @@ class BoardState:
             self.trail_len = msg["trail_len"]
             self.last_dir = msg["last_dir"]
             self.balls = [tuple(b) for b in msg["balls"]]
+            self.last_update_ts = time.monotonic()
+
+    def is_stale(self, timeout: float) -> bool:
+        """True, если движок никогда не публиковал board ИЛИ замолчал дольше
+        timeout — значит xonix_game.py уже не работает (упал, был убит через
+        SIGKILL, который trap в xonix_game.sh перехватить не может), и этому
+        процессу-агенту больше незачем жить. Самостоятельная страховка вместо
+        того, чтобы полагаться только на сигнал от родителя — на практике
+        родительский trap иногда не срабатывал, агенты копились orphan'ами
+        (найдено 2026-08-20: 5 пар одновременно, все пишут в один топик)."""
+        with self.lock:
+            if self.last_update_ts is None:
+                return False  # ещё ни разу не подключились к движку — не наша забота
+            return (time.monotonic() - self.last_update_ts) > timeout
 
     def snapshot(self):
         with self.lock:
@@ -228,7 +245,10 @@ def main() -> None:
             payload = msg.payload.decode("utf-8", errors="ignore").strip()
             if payload in STRATEGIES:
                 with state_lock:
+                    changed = state["strategy"] != payload
                     state["strategy"] = payload
+                if changed:
+                    client.publish(f"xonix/game/{player}/strategy_active", payload, qos=0, retain=True)
 
     client = mqtt.Client()
     client.username_pw_set(MQTT_USER, MQTT_PASS)
@@ -237,9 +257,25 @@ def main() -> None:
     client.subscribe("xonix/game/board", qos=0)
     client.subscribe(f"xonix/game/{player}/strategy", qos=1)
     client.loop_start()
+    # подтверждаем реально применённую стратегию сразу при старте (не только
+    # при смене) — иначе дашборд не знает актуальное значение по умолчанию,
+    # пока кто-то хоть раз не нажал кнопку
+    client.publish(f"xonix/game/{player}/strategy_active", args.strategy, qos=0, retain=True)
 
+    start_ts = time.monotonic()
     while True:
         t0 = time.monotonic()
+
+        if board.last_update_ts is None:
+            if t0 - start_ts > STARTUP_GRACE:
+                # движок так и не подключился за разумное время — скорее
+                # всего, его вообще не запустили (или он упал ещё до первой
+                # публикации board), самостоятельно завершаемся
+                return
+        elif board.is_stale(BOARD_STALE_TIMEOUT):
+            # движок был, но замолчал — упал/убит, держаться за мёртвую игру незачем
+            return
+
         with state_lock:
             strategy_name = state["strategy"]
         direction = STRATEGIES[strategy_name](player, board)
