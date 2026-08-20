@@ -433,32 +433,41 @@ def _get_hud_font() -> ImageFont.FreeTypeFont | None:
 
 
 def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
-    """Полупрозрачная полоска статистики ПО ЦЕНТРУ канвы по вертикали
-    (по просьбе пользователя — раньше была сверху) — проценты территории
-    и счёт побед. По прямому запросу пользователя ("информацию об успехах
-    игроков... показывать в потоке в виде полупрозрачного блока") — именно
-    В ВИДЕОПОТОКЕ, не только на дашборде HA, поэтому рисуется прямо на
-    кадре, а не отдельной карточкой снаружи. Полупрозрачность (не полностью
+    """Полупрозрачный блок статистики ПРЯМО ПО ЦЕНТРУ канвы (и по горизонтали,
+    и по вертикали — по прямой просьбе пользователя; раньше пробовали полосу
+    сверху, потом полосу по центру только по вертикали) — проценты территории
+    и счёт побед, двумя строками. По прямому запросу пользователя
+    ("информацию об успехах игроков... показывать в потоке в виде
+    полупрозрачного блока") — именно В ВИДЕОПОТОКЕ, не только на дашборде
+    HA, поэтому рисуется прямо на кадре. Полупрозрачность (не полностью
     непрозрачная подложка) — чтобы не закрывать игровое поле под ней."""
     font = _get_hud_font()
     if font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
-    h = 34
-    y0 = (CANVAS_H - h) // 2
-    strip = Image.new("RGBA", (CANVAS_W, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(strip)
-    draw.rectangle([0, 0, CANVAS_W, h], fill=(0, 0, 0, 115))
     p1_text = f"Голубой {field.percent('p1'):.1f}%  побед: {wins['p1']}"
     p2_text = f"Жёлтый {field.percent('p2'):.1f}%  побед: {wins['p2']}"
-    draw.text((10, 7), p1_text, font=font, fill=(0, 200, 255, 255))
-    p2_w = draw.textlength(p2_text, font=font)
-    draw.text((CANVAS_W - 10 - p2_w, 7), p2_text, font=font, fill=(255, 200, 0, 255))
 
-    strip_rgba = np.array(strip, dtype=np.float32)
-    alpha = strip_rgba[:, :, 3:4] / 255.0
-    strip_bgr = strip_rgba[:, :, [2, 1, 0]]
-    region = canvas[y0:y0 + h, 0:CANVAS_W].astype(np.float32)
-    canvas[y0:y0 + h, 0:CANVAS_W] = (strip_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+    pad_x, pad_y, line_gap = 16, 10, 6
+    tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    p1_w = tmp.textlength(p1_text, font=font)
+    p2_w = tmp.textlength(p2_text, font=font)
+    line_h = font.size + 4
+    box_w = int(max(p1_w, p2_w)) + pad_x * 2
+    box_h = line_h * 2 + line_gap + pad_y * 2
+
+    x0 = (CANVAS_W - box_w) // 2
+    y0 = (CANVAS_H - box_h) // 2
+    block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(block)
+    draw.rectangle([0, 0, box_w, box_h], fill=(0, 0, 0, 130))
+    draw.text((pad_x, pad_y), p1_text, font=font, fill=(0, 200, 255, 255))
+    draw.text((pad_x, pad_y + line_h + line_gap), p2_text, font=font, fill=(255, 200, 0, 255))
+
+    block_rgba = np.array(block, dtype=np.float32)
+    alpha = block_rgba[:, :, 3:4] / 255.0
+    block_bgr = block_rgba[:, :, [2, 1, 0]]
+    region = canvas[y0:y0 + box_h, x0:x0 + box_w].astype(np.float32)
+    canvas[y0:y0 + box_h, x0:x0 + box_w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
     return canvas
 
 
