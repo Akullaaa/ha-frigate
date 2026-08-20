@@ -8,3 +8,4 @@
 .search_stats.json
 .vacuum
 model_cache/
+__pycache__/
