@@ -114,16 +114,13 @@ def strategy_simple(player: str, board: BoardState) -> str:
         return "right"
     grid, gw, gh, cursor, trail_len, last_dir, balls = snap
     cx, cy = cursor[player]
-    opp = "p2" if player == "p1" else "p1"
-    opp_territory = TERRITORY_OF[opp]
 
     candidates = []
     for d, (dx, dy) in DIRS.items():
         nx, ny = cx + dx, cy + dy
         if nx < 0 or ny < 0 or nx >= gw or ny >= gh:
             continue
-        if grid[nx, ny] == opp_territory:
-            continue
+        # чужая территория теперь тоже отвоёвывается — не блокируем движение
         score = random.uniform(0, 1)
         for bx, by in balls:
             dist = math.hypot(bx - nx, by - ny)
@@ -162,7 +159,6 @@ def strategy_smart(player: str, board: BoardState) -> str:
     cx, cy = cursor[player]
     opp = "p2" if player == "p1" else "p1"
     opp_cursor = cursor[opp]
-    opp_territory = TERRITORY_OF[opp]
     my_territory = TERRITORY_OF[player]
     trailing = trail_len[player] > 0
     exiting = not trailing
@@ -192,8 +188,7 @@ def strategy_smart(player: str, board: BoardState) -> str:
         nx, ny = cx + dx, cy + dy
         if nx < 0 or ny < 0 or nx >= gw or ny >= gh:
             continue
-        if grid[nx, ny] == opp_territory:
-            continue
+        # чужая территория теперь тоже отвоёвывается — не блокируем движение
         score = random.uniform(0, 1) * 0.2
         for bx, by in balls:
             dist = math.hypot(bx - nx, by - ny)
