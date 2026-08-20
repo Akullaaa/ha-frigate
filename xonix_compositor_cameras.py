@@ -178,9 +178,10 @@ def main() -> None:
     for name, size, cmd in CAMERAS:
         threading.Thread(target=reader, args=(name, size, cmd), daemon=True).start()
 
-    # ждём первый настоящий кадр фона, чтобы не стартовать с чистого чёрного
-    time.sleep(3)
-
+    # без искусственной паузы — первые кадры и так чёрные заглушки (reader
+    # выставляет их сразу), ждать здесь нечего, а Frigate live-view не готов
+    # долго терпеть тишину перед первым кадром (иначе уходит в "экономичный
+    # режим")
     levels = spawn()
     stdout = sys.stdout.buffer
     period = 1.0 / FPS
