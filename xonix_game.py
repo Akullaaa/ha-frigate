@@ -172,6 +172,7 @@ class MqttState:
         self.llm_provider: dict[str, str] = {"p1": "off", "p2": "off"}
         self.llm_usage: dict[str, dict] = {"p1": {}, "p2": {}}  # последний вызов: input/output/cached
         self.llm_status: dict[str, str] = {"p1": "", "p2": ""}
+        self.llm_interval: dict[str, float | None] = {"p1": None, "p2": None}  # DECIDE_INTERVAL стратега, для HUD
 
     def is_human(self, player: str) -> bool:
         with self.lock:
@@ -243,6 +244,11 @@ def on_mqtt_message(client, userdata, msg) -> None:
                 pass
         elif topic in ("xonix/game/p1/llm_status", "xonix/game/p2/llm_status"):
             mqtt_state.llm_status["p1" if "p1" in topic else "p2"] = payload
+        elif topic in ("xonix/game/p1/llm_interval", "xonix/game/p2/llm_interval"):
+            try:
+                mqtt_state.llm_interval["p1" if "p1" in topic else "p2"] = float(payload)
+            except ValueError:
+                pass
 
 
 def start_mqtt() -> mqtt.Client:
@@ -266,6 +272,8 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/llm_usage", qos=0)
     client.subscribe("xonix/game/p1/llm_status", qos=0)
     client.subscribe("xonix/game/p2/llm_status", qos=0)
+    client.subscribe("xonix/game/p1/llm_interval", qos=0)
+    client.subscribe("xonix/game/p2/llm_interval", qos=0)
     client.loop_start()
     return client
 
@@ -482,6 +490,9 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
 
     provider = mqtt_state.llm_provider[player]
     if not mqtt_state.is_human(player) and provider != "off":
+        interval = mqtt_state.llm_interval[player]
+        if interval is not None:
+            lines.append(f"    думает раз в: {interval:.0f}с")
         usage = mqtt_state.llm_usage[player]
         if usage:
             lines.append(f"    вход: {usage.get('input', '?')} токенов")
