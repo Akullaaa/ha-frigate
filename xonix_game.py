@@ -496,50 +496,62 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
     return lines
 
 
-def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
-    """Полупрозрачный блок статистики ПРЯМО ПО ЦЕНТРУ канвы (и по горизонтали,
-    и по вертикали — по прямой просьбе пользователя; раньше пробовали полосу
-    сверху, потом полосу по центру только по вертикали) — проценты территории,
-    счёт побед и (для ботов на LLM) статистика токенов последнего запроса.
-    По прямому запросу пользователя ("информацию об успехах игроков...
-    показывать в потоке в виде полупрозрачного блока") — именно В
-    ВИДЕОПОТОКЕ, не только на дашборде HA, поэтому рисуется прямо на кадре.
-    Полупрозрачность — чтобы не закрывать игровое поле под ней."""
-    font = _get_hud_font(18)
-    small_font = _get_hud_font(14)
-    if font is None or small_font is None:
-        return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
+def _render_player_block(lines: list[str], font: ImageFont.FreeTypeFont, small_font: ImageFont.FreeTypeFont, color: tuple[int, int, int]) -> Image.Image:
+    rows = [(lines[0], font, (*color, 255))]
+    rows += [(t, small_font, (*color, 200)) for t in lines[1:]]
 
-    p1_lines = _player_hud_lines("p1", field, wins)
-    p2_lines = _player_hud_lines("p2", field, wins)
-    rows: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int]]] = []
-    rows.append((p1_lines[0], font, (0, 200, 255, 255)))
-    rows += [(t, small_font, (0, 200, 255, 200)) for t in p1_lines[1:]]
-    rows.append((p2_lines[0], font, (255, 200, 0, 255)))
-    rows += [(t, small_font, (255, 200, 0, 200)) for t in p2_lines[1:]]
-
-    pad_x, pad_y, line_gap = 16, 10, 5
+    pad_x, pad_y, line_gap = 14, 9, 4
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     widths = [tmp.textlength(text, font=f) for text, f, _ in rows]
     heights = [f.size + 4 for _, f, _ in rows]
     box_w = int(max(widths)) + pad_x * 2
     box_h = sum(heights) + line_gap * (len(rows) - 1) + pad_y * 2
 
-    x0 = (CANVAS_W - box_w) // 2
-    y0 = (CANVAS_H - box_h) // 2
     block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(block)
     draw.rectangle([0, 0, box_w, box_h], fill=(0, 0, 0, 130))
     y = pad_y
-    for (text, f, color), h in zip(rows, heights):
-        draw.text((pad_x, y), text, font=f, fill=color)
+    for (text, f, c), h in zip(rows, heights):
+        draw.text((pad_x, y), text, font=f, fill=c)
         y += h + line_gap
+    return block
 
+
+def _blend_block(canvas: np.ndarray, block: Image.Image, x0: int, y0: int) -> None:
     block_rgba = np.array(block, dtype=np.float32)
     alpha = block_rgba[:, :, 3:4] / 255.0
     block_bgr = block_rgba[:, :, [2, 1, 0]]
-    region = canvas[y0:y0 + box_h, x0:x0 + box_w].astype(np.float32)
-    canvas[y0:y0 + box_h, x0:x0 + box_w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+    w, h = block.size
+    region = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
+    canvas[y0:y0 + h, x0:x0 + w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+
+
+def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
+    """Два независимых полупрозрачных столбика — Голубой СЛЕВА, Жёлтый
+    СПРАВА (по прямой просьбе пользователя: "покажи данные столбик по
+    каждому игроку справа и слева" — раньше был один общий блок по центру
+    с обоими игроками друг под другом). Каждый центрирован в своей четверти
+    экрана по вертикали независимо от другого. Проценты территории, счёт
+    побед и (для ботов на LLM) статистика токенов/стоимости последнего
+    запроса. Рисуется прямо на кадре (не карточкой на дашборде HA) —
+    по прямому запросу "информацию... показывать в потоке", полупрозрачно,
+    чтобы не закрывать игровое поле под собой."""
+    font = _get_hud_font(18)
+    small_font = _get_hud_font(14)
+    if font is None or small_font is None:
+        return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
+
+    p1_block = _render_player_block(_player_hud_lines("p1", field, wins), font, small_font, (0, 200, 255))
+    p2_block = _render_player_block(_player_hud_lines("p2", field, wins), font, small_font, (255, 200, 0))
+
+    quarter = CANVAS_W // 4
+    p1_x0 = quarter - p1_block.size[0] // 2
+    p1_y0 = (CANVAS_H - p1_block.size[1]) // 2
+    p2_x0 = (CANVAS_W - quarter) - p2_block.size[0] // 2
+    p2_y0 = (CANVAS_H - p2_block.size[1]) // 2
+
+    _blend_block(canvas, p1_block, p1_x0, p1_y0)
+    _blend_block(canvas, p2_block, p2_x0, p2_y0)
     return canvas
 
 
