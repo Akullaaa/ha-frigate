@@ -51,6 +51,7 @@ MQTT-интеграцией HA как сентинел "нет значения"
 import argparse
 import hashlib
 import json
+import math
 import threading
 import time
 import urllib.error
@@ -343,6 +344,8 @@ class Shared:
         self.state: dict = {}
         self.general_log: list[dict] = []
         self.private_log: list[dict] = []
+        self.board: dict = {}  # xonix/game/board — та же сводка, что видит эвристика
+        self.prev_percent: dict[str, float] = {}  # для тренда между циклами опроса
 
 
 def _format_log(entries: list[dict], limit: int) -> str:
@@ -357,18 +360,64 @@ def _format_log(entries: list[dict], limit: int) -> str:
     return "\n".join(lines) if lines else "(пока пусто)"
 
 
+def _board_summary(player: str, opp: str, board: dict) -> str:
+    """Сводка по xonix/game/board (та же сырая доска, что читает быстрая
+    эвристика xonix_ai_agent.py) — раньше LLM-стратег её вообще не видел,
+    решал только по двум процентам и чату. Добавлено по прямому запросу
+    пользователя ("использовать все возможности" модели) — без этого
+    более крупный контекст/ризонинг k3/Haiku тратился на те же два числа,
+    что и раньше, реально нечем было воспользоваться."""
+    if not board:
+        return "(данные о поле ещё не пришли)"
+    cursor = board.get("cursor", {})
+    my_cursor = cursor.get(player)
+    opp_cursor = cursor.get(opp)
+    balls = board.get("balls", [])
+    trail_len = board.get("trail_len", {}).get(player, 0)
+    parts = []
+    if trail_len > 0:
+        parts.append(f"сейчас в набеге (след {trail_len} клеток, вне своей территории — рискует при столкновении)")
+    else:
+        parts.append("сейчас на своей территории (безопасно)")
+    if my_cursor and balls:
+        nearest = min(math.hypot(bx - my_cursor[0], by - my_cursor[1]) for bx, by in balls)
+        parts.append(f"ближайший шарик в {nearest:.1f} клетках")
+    if my_cursor and opp_cursor:
+        odist = math.hypot(opp_cursor[0] - my_cursor[0], opp_cursor[1] - my_cursor[1])
+        parts.append(f"соперник в {odist:.1f} клетках")
+    return "; ".join(parts)
+
+
 def build_user_prompt(player: str, shared: Shared) -> str:
     opp = "p2" if player == "p1" else "p1"
     with shared.lock:
         s = shared.state
         general_log = list(shared.general_log)
         private_log = list(shared.private_log)
+        board = dict(shared.board)
+        prev_pct = shared.prev_percent.get(player)
     my_pct = s.get(f"{player}_percent", "?")
     opp_pct = s.get(f"{opp}_percent", "?")
     difficulty = s.get("difficulty", "?")
+
+    trend = ""
+    if isinstance(my_pct, (int, float)) and prev_pct is not None:
+        delta = my_pct - prev_pct
+        if delta > 0.5:
+            trend = f" (выросла на {delta:.1f} за последний цикл)"
+        elif delta < -0.5:
+            trend = f" (упала на {-delta:.1f} за последний цикл — теряем территорию)"
+        else:
+            trend = " (без изменений за последний цикл)"
+    if isinstance(my_pct, (int, float)):
+        with shared.lock:
+            shared.prev_percent[player] = my_pct
+
+    board_summary = _board_summary(player, opp, board)
     return (
-        f"Моя территория: {my_pct}%, территория соперника: {opp_pct}%, "
-        f"сложность: {difficulty}.\n\n"
+        f"Моя территория: {my_pct}%{trend}, территория соперника: {opp_pct}%, "
+        f"сложность: {difficulty}.\n"
+        f"Положение на поле: {board_summary}.\n\n"
         f"Общий чат партии (последние сообщения):\n{_format_log(general_log, 8)}\n\n"
         f"Твоя переписка со своим ботом (последние сообщения):\n{_format_log(private_log, 5)}"
     )
@@ -411,12 +460,23 @@ def main() -> None:
                     shared.private_log = json.loads(msg.payload).get("messages", [])
             except (json.JSONDecodeError, AttributeError):
                 pass
+        elif msg.topic == "xonix/game/board":
+            try:
+                with shared.lock:
+                    shared.board = json.loads(msg.payload)
+            except json.JSONDecodeError:
+                pass
 
     client = mqtt.Client()
     client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_message = on_message
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
     client.subscribe("xonix/game/state", qos=0)
+    # Та же сводка доски, что у эвристики (xonix_ai_agent.py) — курсоры,
+    # шарики, длина следа. Раньше стратег её не видел вообще, решал
+    # вслепую по двум процентам — добавлено, чтобы у модели было что
+    # реально анализировать (см. _board_summary).
+    client.subscribe("xonix/game/board", qos=0)
     client.subscribe(f"xonix/game/{player}/llm_provider", qos=1)
     client.subscribe(f"xonix/game/{player}/persona", qos=1)
     client.subscribe("xonix/chat/log/general", qos=0)
