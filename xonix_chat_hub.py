@@ -132,6 +132,14 @@ def main() -> None:
         if msg.topic == "xonix/chat/post/user":
             sender = str(payload.get("sender", "user")) or "user"
             channel = "general"  # пользователь пишет только в общий канал
+            if sender == "user":
+                # Поле ввода на дашборде без state_topic держит на экране
+                # то, что было набрано, — повторный Enter с тем же текстом
+                # ничего не публикует (HA не видит изменения, выглядит как
+                # "отправка не работает"). Ставим пустую строку в отдельный
+                # state_topic поля сразу после обработки — поле визуально
+                # очищается, как в обычном чате.
+                client.publish("xonix/chat/ui/general_send_ack", "", qos=0, retain=False)
         elif msg.topic == "xonix/chat/post/p1":
             sender = "p1"
             channel = "private_p1" if channel_hint == "private" else "general"
