@@ -43,6 +43,7 @@
 JSON-файл на диске.
 """
 import json
+import os
 import threading
 import time
 
@@ -81,9 +82,19 @@ class Hub:
             pass
 
     def _save(self) -> None:
+        # Атомарная запись (tmp + os.replace) — прямой open(..., "w")
+        # усекает файл ДО того, как что-либо записано; если процесс убьют
+        # (SIGKILL от go2rtc/рестарт аддона) между открытием и завершением
+        # dump, файл остаётся пустым/битым, а _load() при следующем старте
+        # молча откатывается на пустую историю (except JSONDecodeError) —
+        # именно так вся история чата однажды обнулилась вживую. os.replace
+        # atomic на POSIX: в любой момент файл — либо старое полное
+        # содержимое, либо новое полное, никогда середина.
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            tmp = HISTORY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, ensure_ascii=False)
+            os.replace(tmp, HISTORY_FILE)
         except OSError:
             pass
 

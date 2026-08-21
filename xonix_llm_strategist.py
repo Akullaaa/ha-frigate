@@ -52,6 +52,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -148,9 +149,15 @@ def add_cost(consumer: str, cents: float) -> float:
     обновление в статистике, не деньги), файловый лок ради этого не заводим."""
     data = load_total_cost()
     data[consumer] = data.get(consumer, 0.0) + cents
+    # Атомарная запись (tmp + os.replace) — см. xonix_chat_hub.py._save():
+    # прямой open(..., "w") усекает файл до записи, SIGKILL между
+    # открытием и dump оставляет пустой/битый файл, который следующий
+    # load_total_cost() молча трактует как "с нуля" (обнулит счёт выгоды).
     try:
-        with open(COST_FILE, "w", encoding="utf-8") as f:
+        tmp = COST_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
+        os.replace(tmp, COST_FILE)
     except OSError:
         pass
     return data[consumer]

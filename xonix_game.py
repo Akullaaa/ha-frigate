@@ -45,6 +45,7 @@ RTSP push в go2rtc, тот же паттерн, что xonix_layer_multicam.sh)
 """
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -454,9 +455,15 @@ def load_wins() -> dict:
 
 
 def save_wins(wins: dict) -> None:
+    # Атомарная запись (tmp + os.replace) — см. подробное объяснение в
+    # xonix_chat_hub.py._save(): прямой open(..., "w") усекает файл до
+    # записи, SIGKILL между открытием и dump оставляет пустой/битый файл,
+    # который следующий load() молча трактует как "с нуля".
     try:
-        with open(WINS_FILE, "w", encoding="utf-8") as f:
+        tmp = WINS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(wins, f)
+        os.replace(tmp, WINS_FILE)
     except OSError:
         pass
 
