@@ -24,6 +24,8 @@ xonix/chat/log/general) и отвечает ТОЛЬКО на сообщения
 """
 import argparse
 import json
+import os
+import signal
 import threading
 import time
 import urllib.error
@@ -47,6 +49,32 @@ MQTT_PASS = "qqqqqqq7"
 
 CHECK_INTERVAL = 8.0  # секунд между проверками "не написал ли человек что-то новое"
 STATE_STALE_TIMEOUT = 30.0  # как у остальных процессов партии — движка нет, выходим
+LOCK_FILE = "/config/xonix_chat_alena.pid"
+
+
+def _acquire_singleton_lock() -> None:
+    """Не полагаемся на trap cleanup в xonix_game.sh — он ненадёжен при
+    SIGKILL от go2rtc (та же утечка процессов, что уже ловили у
+    xonix_ai_agent.py, см. project_xonix_game.md). Проверка board/state
+    на устаревание тут не спасает: осиротевший процесс продолжает видеть
+    свежие xonix/game/state от живого движка и никогда не сработает по
+    таймауту сам — нужен явный лок. Если старый PID жив и это точно этот
+    же скрипт (не переиспользованный чужой PID) — убиваем его и забираем
+    лок, не плодим вторую копию (проверено вживую: два экземпляра отвечали
+    дважды на одно сообщение пользователя)."""
+    try:
+        with open(LOCK_FILE, encoding="utf-8") as f:
+            old_pid = int(f.read().strip())
+        os.kill(old_pid, 0)
+        with open(f"/proc/{old_pid}/cmdline", "rb") as f:
+            cmdline = f.read()
+        if b"xonix_chat_alena" in cmdline:
+            os.kill(old_pid, signal.SIGKILL)
+            time.sleep(0.5)
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        pass
+    with open(LOCK_FILE, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
 
 SYSTEM_PROMPT = (
     "Ты — Алёна, домашний ИИ-агент (Claude Code) в доме пользователя. Сейчас "
@@ -97,6 +125,8 @@ def build_user_prompt(shared: Shared, new_text: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.parse_args()
+
+    _acquire_singleton_lock()
 
     shared = Shared()
     general_log_received = threading.Event()
