@@ -444,6 +444,43 @@ class Field:
                     self.die(player)
                     break
 
+    _VALID_CELL_VALUES = {EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL}
+
+    def check_invariants(self) -> list[str]:
+        """Надёжный баг-трекер — в отличие от LLM-подсказки ("дополнительные
+        глаза" в общем чате, см. SYSTEM_PROMPT_TEMPLATE в xonix_llm_
+        strategist.py), это точные проверки по правилам игры, не догадки по
+        текстовому резюме: нарушение здесь — гарантированно реальный баг в
+        реализации, не штатное событие с некоторой вероятностью. Не roняет
+        поток при нарушении (raise здесь хуже самого бага — оборвёт видео) —
+        вызывающий код публикует найденное в MQTT/лог, см. main()."""
+        problems = []
+        bad_values = set(np.unique(self.grid).tolist()) - self._VALID_CELL_VALUES
+        if bad_values:
+            problems.append(f"недопустимые значения в grid: {sorted(bad_values)}")
+        for player in ("p1", "p2"):
+            trail_in_grid = int((self.grid == TRAIL_OF[player]).sum())
+            if trail_in_grid != len(self.trail[player]):
+                problems.append(
+                    f"{player}: длина следа не совпадает — клеток TRAIL в grid: "
+                    f"{trail_in_grid}, в списке trail: {len(self.trail[player])}"
+                )
+            cx, cy = self.cursor[player]
+            if not (0 <= cx < GRID_W and 0 <= cy < GRID_H):
+                problems.append(f"{player}: курсор вне поля ({cx}, {cy})")
+                continue
+            cell = int(self.grid[cx, cy])
+            expected = TRAIL_OF[player] if self.trail[player] else TERRITORY_OF[player]
+            if cell != expected:
+                problems.append(
+                    f"{player}: курсор на клетке типа {cell}, ожидался тип {expected} "
+                    f"({'в наборе' if self.trail[player] else 'дома'})"
+                )
+            pct = self.percent(player)
+            if not (0.0 <= pct <= 100.0):
+                problems.append(f"{player}: процент территории вне диапазона 0-100 — {pct}")
+        return problems
+
 
 def load_wins() -> dict:
     try:
@@ -696,6 +733,7 @@ def main() -> None:
     last_state_pub = 0.0
     last_board_pub = 0.0
     BOARD_PERIOD = 0.25  # ~4 раза в секунду — агенту незачем чаще, поле неспешное
+    last_bug_report: list[str] = []  # чтобы не спамить лог/MQTT одним и тем же нарушением каждый тик
 
     while True:
         t0 = time.monotonic()
@@ -717,6 +755,18 @@ def main() -> None:
                 direction = mqtt_state.get_move(player) if mqtt_state.is_human(player) else mqtt_state.get_ai_move(player)
                 field.step(player, direction)
             field.step_balls_and_check()
+
+            problems = field.check_invariants()
+            if problems != last_bug_report:
+                last_bug_report = problems
+                if problems:
+                    print(f"BUG DETECTED: {problems}", file=sys.stderr, flush=True)
+                client.publish(
+                    "xonix/game/bug_detected",
+                    json.dumps({"problems": problems, "ts": time.time()}, ensure_ascii=False),
+                    qos=0, retain=True,
+                )
+
             target = field.target_percent()
             for player in ("p1", "p2"):
                 if field.percent(player) >= target:
