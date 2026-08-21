@@ -173,6 +173,7 @@ class MqttState:
         self.llm_usage: dict[str, dict] = {"p1": {}, "p2": {}}  # последний вызов: input/output/cached
         self.llm_status: dict[str, str] = {"p1": "", "p2": ""}
         self.llm_interval: dict[str, float | None] = {"p1": None, "p2": None}  # DECIDE_INTERVAL стратега, для HUD
+        self.llm_params: dict[str, dict] = {"p1": {}, "p2": {}}  # order/aggression/caution, для HUD
 
     def is_human(self, player: str) -> bool:
         with self.lock:
@@ -249,6 +250,11 @@ def on_mqtt_message(client, userdata, msg) -> None:
                 mqtt_state.llm_interval["p1" if "p1" in topic else "p2"] = float(payload)
             except ValueError:
                 pass
+        elif topic in ("xonix/game/p1/llm_params", "xonix/game/p2/llm_params"):
+            try:
+                mqtt_state.llm_params["p1" if "p1" in topic else "p2"] = json.loads(payload)
+            except json.JSONDecodeError:
+                pass
 
 
 def start_mqtt() -> mqtt.Client:
@@ -274,6 +280,8 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/llm_status", qos=0)
     client.subscribe("xonix/game/p1/llm_interval", qos=0)
     client.subscribe("xonix/game/p2/llm_interval", qos=0)
+    client.subscribe("xonix/game/p1/llm_params", qos=0)
+    client.subscribe("xonix/game/p2/llm_params", qos=0)
     client.loop_start()
     return client
 
@@ -473,11 +481,19 @@ def _get_hud_font(size: int) -> ImageFont.FreeTypeFont | None:
     return cached or None
 
 
-def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
-    """Заголовок — только имя игрока, ВСЁ остальное (кто играет, процент
-    территории, победы, статистика LLM) — каждое значение отдельной
-    строкой ("столбик", по прямому запросу пользователя: раньше и это, и
-    статистика ниже были смешаны/сжаты в одну строку через запятые)."""
+_ORDER_RU = {"expand": "расширение", "raid": "набег", "defend": "оборона", "regroup": "перегруппировка"}
+_PHASE_RU = {"playing": "идёт", "paused": "пауза", "gameover": "конец раунда"}
+
+
+def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> list[str]:
+    """Заголовок — только имя игрока, ВСЁ остальное разбито по категориям
+    (Игрок / Партия / Стратегия / Токены), каждое значение отдельной
+    строкой ("столбик", по прямому запросу пользователя). Категории —
+    заголовки без отступа, детали внутри — с отступом (см. _render_player_
+    block: заголовок получает более высокую альфу, чтобы визуально
+    отличаться от деталей). Партия/сложность/цель/фаза дублируются в обоих
+    блоках по прямому запросу пользователя — весь текст читается из
+    одного блока, не нужно смотреть на оба сразу."""
     name = "Голубой" if player == "p1" else "Жёлтый"
     if mqtt_state.is_human(player):
         who = "человек"
@@ -493,18 +509,30 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
             # не пришёл — временно название провайдера, не пусто.
             model = mqtt_state.llm_usage[player].get("model", provider.capitalize())
             who = f"бот: {strat}+{model}"
-    lines = [
-        name,
-        f"    {who}",
-        f"    территория: {field.percent(player):.1f}%",
-        f"    побед: {wins[player]}",
-    ]
+
+    lines = [name, "Игрок", f"    {who}"]
+
+    lines.append("Партия")
+    lines.append(f"    территория: {field.percent(player):.1f}%")
+    lines.append(f"    побед: {wins[player]}")
+    lines.append(f"    сложность: {mqtt_state.difficulty}")
+    lines.append(f"    цель: {field.target_percent():.0f}%")
+    lines.append(f"    фаза: {_PHASE_RU.get(phase, phase)}")
 
     provider = mqtt_state.llm_provider[player]
     if not mqtt_state.is_human(player) and provider != "off":
+        lines.append("Стратегия")
         interval = mqtt_state.llm_interval[player]
         if interval is not None:
             lines.append(f"    думает раз в: {interval:.0f}с")
+        params = mqtt_state.llm_params[player]
+        if params:
+            order = params.get("order")
+            lines.append(f"    приказ: {_ORDER_RU.get(order, order)}")
+            lines.append(f"    агрессия: {params.get('aggression', 0):.2f}")
+            lines.append(f"    осторожность: {params.get('caution', 0):.2f}")
+
+        lines.append("Токены")
         usage = mqtt_state.llm_usage[player]
         if usage:
             lines.append(f"    вход: {usage.get('input', '?')} токенов")
@@ -525,7 +553,9 @@ def _player_hud_lines(player: str, field: "Field", wins: dict) -> list[str]:
 
 def _render_player_block(lines: list[str], font: ImageFont.FreeTypeFont, small_font: ImageFont.FreeTypeFont, color: tuple[int, int, int]) -> Image.Image:
     rows = [(lines[0], font, (*color, 255))]
-    rows += [(t, small_font, (*color, 200)) for t in lines[1:]]
+    # Заголовок категории — без отступа "    ", в отличие от строк-деталей —
+    # получает более высокую альфу, чтобы визуально выделяться как группа.
+    rows += [(t, small_font, (*color, 200 if t.startswith("    ") else 235)) for t in lines[1:]]
 
     pad_x, pad_y, line_gap = 14, 9, 4
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
@@ -553,14 +583,15 @@ def _blend_block(canvas: np.ndarray, block: Image.Image, x0: int, y0: int) -> No
     canvas[y0:y0 + h, x0:x0 + w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
 
 
-def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
+def draw_hud(canvas: np.ndarray, field: "Field", wins: dict, phase: str) -> np.ndarray:
     """Два независимых полупрозрачных столбика — Голубой СЛЕВА, Жёлтый
     СПРАВА (по прямой просьбе пользователя: "покажи данные столбик по
     каждому игроку справа и слева" — раньше был один общий блок по центру
     с обоими игроками друг под другом). Каждый центрирован в своей четверти
-    экрана по вертикали независимо от другого. Проценты территории, счёт
-    побед и (для ботов на LLM) статистика токенов/стоимости последнего
-    запроса. Рисуется прямо на кадре (не карточкой на дашборде HA) —
+    экрана по вертикали независимо от другого. Данные разбиты по категориям
+    (Игрок/Партия/Стратегия/Токены, см. _player_hud_lines) — по прямому
+    запросу пользователя, раньше это был плоский список без группировки.
+    Рисуется прямо на кадре (не карточкой на дашборде HA) —
     по прямому запросу "информацию... показывать в потоке", полупрозрачно,
     чтобы не закрывать игровое поле под собой."""
     font = _get_hud_font(18)
@@ -568,8 +599,8 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict) -> np.ndarray:
     if font is None or small_font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
 
-    p1_block = _render_player_block(_player_hud_lines("p1", field, wins), font, small_font, (0, 200, 255))
-    p2_block = _render_player_block(_player_hud_lines("p2", field, wins), font, small_font, (255, 200, 0))
+    p1_block = _render_player_block(_player_hud_lines("p1", field, wins, phase), font, small_font, (0, 200, 255))
+    p2_block = _render_player_block(_player_hud_lines("p2", field, wins, phase), font, small_font, (255, 200, 0))
 
     quarter = CANVAS_W // 4
     p1_x0 = quarter - p1_block.size[0] // 2
@@ -687,14 +718,14 @@ def main() -> None:
                     phase_until = t0 + 2.5
                     wins[player] += 1
                     save_wins(wins)
-                    flash_win(stdout, draw_hud(render(field), field, wins), PLAYER_COLOR[player])
+                    flash_win(stdout, draw_hud(render(field), field, wins, phase), PLAYER_COLOR[player])
         elif phase == "gameover" and t0 >= phase_until:
             field.reset()
             phase = "playing"
             winner = None
 
         frame = render(field)
-        frame = draw_hud(frame, field, wins)
+        frame = draw_hud(frame, field, wins, phase)
         stdout.write(frame.tobytes())
         stdout.flush()
 
