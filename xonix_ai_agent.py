@@ -236,6 +236,18 @@ def strategy_smart(player: str, board: BoardState) -> str:
             continue
         # чужая территория теперь тоже отвоёвывается — не блокируем движение
         score = random.uniform(0, 1) * 0.2
+        # Мягкий штраф за БЛИЗОСТЬ к собственному следу (не только прямое
+        # столкновение — то уже отсеяно continue выше). Без этого бот
+        # проходит вплотную к своему хвосту и упирается в него уже в
+        # последний момент, когда все 4 направления заняты (включая
+        # разворот — тот тоже смертелен на своём следе) и функция
+        # откатывается на prev_dir без проверки. Штраф пораньше не даёт
+        # боту самому себя загонять в такие тупики.
+        near_own_trail = 0
+        for ex, ey in ((nx + 1, ny), (nx - 1, ny), (nx, ny + 1), (nx, ny - 1)):
+            if 0 <= ex < gw and 0 <= ey < gh and grid[ex, ey] == TRAIL_OF[player]:
+                near_own_trail += 1
+        score -= near_own_trail * 1.5 * caution_factor
         for bx, by in balls:
             dist = math.hypot(bx - nx, by - ny)
             if dist < 6:
