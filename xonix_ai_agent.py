@@ -61,6 +61,7 @@ BOARD_STALE_TIMEOUT = 20.0  # board публикуется раз в 0.25с — 
 
 EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
 TERRITORY_OF = {"p1": P1_TERRITORY, "p2": P2_TERRITORY}
+TRAIL_OF = {"p1": P1_TRAIL, "p2": P2_TRAIL}
 
 DIRS = {
     "up": (0, -1),
@@ -225,6 +226,13 @@ def strategy_smart(player: str, board: BoardState) -> str:
             continue
         nx, ny = cx + dx, cy + dy
         if nx < 0 or ny < 0 or nx >= gw or ny >= gh:
+            continue
+        if grid[nx, ny] == TRAIL_OF[player]:
+            # шаг на собственный след = мгновенная смерть (Field.step в
+            # xonix_game.py), а раньше запрещался только точный разворот на
+            # 180° — петля через свой же хвост ничем не удерживалась.
+            # Найдено вживую (боты иногда сами себя убивали), почищено по
+            # прямому запросу пользователя "сделать умного бота ещё умнее".
             continue
         # чужая территория теперь тоже отвоёвывается — не блокируем движение
         score = random.uniform(0, 1) * 0.2
