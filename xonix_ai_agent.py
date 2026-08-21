@@ -164,6 +164,44 @@ ORDER_PARAMS = {
 }
 
 
+def _can_escape(grid, gw, gh, sx, sy, player) -> bool:
+    """Полноценный lookahead (не одношаговая оценка) — векторизованный на
+    numpy floodfill вместо BFS в чистом Python (иначе на 4Гц и до 3
+    кандидатов на игрока это было бы слишком дорого). Единственная стена
+    для игрока — его СОБСТВЕННЫЙ след (наступить на чужой след/территорию
+    можно, это не убивает); "спасение" — либо возврат на свою территорию
+    (замыкает контур), либо выход за границу поля (Field.step: попытка
+    выйти за границу во время следа тоже замыкает контур, см. историю
+    багов в project_xonix_game.md). Если ни то, ни другое не достижимо —
+    кандидат ведёт в тупик, откуда живым не выйти НИКАК, не только этим
+    конкретным следующим шагом (то, что не ловил прежний точечный фикс
+    "не наступать на след впритык")."""
+    walkable = grid != TRAIL_OF[player]
+    if not walkable[sx, sy]:
+        return False
+    reached = np.zeros_like(walkable)
+    reached[sx, sy] = True
+    frontier = reached.copy()
+    my_territory = TERRITORY_OF[player]
+    for _ in range(gw + gh):
+        new_frontier = np.zeros_like(frontier)
+        new_frontier[1:, :] |= frontier[:-1, :]
+        new_frontier[:-1, :] |= frontier[1:, :]
+        new_frontier[:, 1:] |= frontier[:, :-1]
+        new_frontier[:, :-1] |= frontier[:, 1:]
+        new_frontier &= walkable
+        new_frontier &= ~reached
+        if not new_frontier.any():
+            return False
+        reached |= new_frontier
+        frontier = new_frontier
+        if (reached & (grid == my_territory)).any():
+            return True
+        if reached[0, :].any() or reached[-1, :].any() or reached[:, 0].any() or reached[:, -1].any():
+            return True
+    return False
+
+
 def _pick_raid_target(grid, gw, gh, cx, cy, balls, dist_range=(8, 20)):
     lo, hi = dist_range
     best_pt, best_safety = None, -1e9
@@ -248,6 +286,19 @@ def strategy_smart(player: str, board: BoardState) -> str:
             if 0 <= ex < gw and 0 <= ey < gh and grid[ex, ey] == TRAIL_OF[player]:
                 near_own_trail += 1
         score -= near_own_trail * 1.5 * caution_factor
+        # Полноценный lookahead — не просто "клетка рядом с моим следом", а
+        # "есть ли ВООБЩЕ путь отсюда домой или к краю поля, если убрать из
+        # проходимых мой собственный след". Штраф (не hard skip!) — если
+        # штрафовать ВСЕ тупиковые кандидаты жёстким continue и они окажутся
+        # единственными вариантами, функция откатится на нестабильный
+        # prev_dir-фолбэк — той же болезнью, которую лечим. Только пока
+        # реально в набеге (trailing) — на своей территории тупиков не
+        # бывает по определению. trail_len > 4 — коротким следом себя
+        # физически не замкнуть, дорогой floodfill не гоняем зря на
+        # каждый тик с самого начала набега (4Гц × до 3 кандидатов × 2
+        # игрока — не бесплатно).
+        if trailing and trail_len[player] > 4 and not _can_escape(grid, gw, gh, nx, ny, player):
+            score -= 1000.0
         for bx, by in balls:
             dist = math.hypot(bx - nx, by - ny)
             if dist < 6:
