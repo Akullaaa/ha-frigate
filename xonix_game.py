@@ -733,7 +733,7 @@ def main() -> None:
     last_state_pub = 0.0
     last_board_pub = 0.0
     BOARD_PERIOD = 0.25  # ~4 раза в секунду — агенту незачем чаще, поле неспешное
-    last_bug_report: list[str] = []  # чтобы не спамить лог/MQTT одним и тем же нарушением каждый тик
+    last_bug_report: list[str] | None = None  # None — ещё не публиковали ни разу; [] — уже публиковали "всё чисто"
 
     while True:
         t0 = time.monotonic()
