@@ -128,6 +128,38 @@ CAMERAS = {
 latest_frames: dict[str, np.ndarray] = {}
 frames_lock = threading.Lock()
 
+# История загрузки CPU для графика в HUD — по прямому запросу пользователя
+# ("график загрузки процессора на последние 4 минуты"). Только stdlib
+# (/proc/stat), без psutil — тот же принцип, что и у axis_2100_bridge.py
+# (не факт, что сторонние пакеты есть/переживут рестарт контейнера Frigate).
+CPU_HISTORY_SECONDS = 240
+CPU_SAMPLE_INTERVAL = 2
+cpu_history: list[tuple[float, float]] = []
+cpu_history_lock = threading.Lock()
+
+
+def _read_cpu_jiffies() -> tuple[int, int]:
+    with open("/proc/stat") as f:
+        nums = list(map(int, f.readline().split()[1:]))
+    idle = nums[3] + nums[4]  # idle + iowait
+    return idle, sum(nums)
+
+
+def cpu_monitor() -> None:
+    prev_idle, prev_total = _read_cpu_jiffies()
+    while True:
+        time.sleep(CPU_SAMPLE_INTERVAL)
+        idle, total = _read_cpu_jiffies()
+        d_idle, d_total = idle - prev_idle, total - prev_total
+        prev_idle, prev_total = idle, total
+        percent = 0.0 if d_total <= 0 else max(0.0, min(100.0, 100.0 * (1 - d_idle / d_total)))
+        now = time.time()
+        with cpu_history_lock:
+            cpu_history.append((now, percent))
+            cutoff = now - CPU_HISTORY_SECONDS
+            while cpu_history and cpu_history[0][0] < cutoff:
+                cpu_history.pop(0)
+
 
 def camera_reader(name: str, cmd: list[str]) -> None:
     frame_size = CANVAS_W * CANVAS_H * 3
@@ -167,9 +199,10 @@ class MqttState:
         self.control: str | None = None
         self.difficulty = "normal"
         # Только для HUD (draw_hud) — "кто именно играет за бота", не влияет
-        # на саму логику движка (той стратегию/провайдера не сообщают, это
-        # знают только xonix_ai_agent.py/xonix_llm_strategist.py сами).
-        self.strategy: dict[str, str] = {"p1": "smart", "p2": "smart"}
+        # на саму логику движка (той провайдера не сообщают, это знает
+        # только xonix_llm_strategist.py сам). Стратегия ИИ теперь одна
+        # (strategy_smart) — переключателя "простой/умный" на дашборде
+        # больше нет, убран по прямому запросу пользователя (2026-08-23).
         self.llm_provider: dict[str, str] = {"p1": "off", "p2": "off"}
         self.llm_usage: dict[str, dict] = {"p1": {}, "p2": {}}  # последний вызов: input/output/cached
         self.llm_status: dict[str, str] = {"p1": "", "p2": ""}
@@ -230,10 +263,6 @@ def on_mqtt_message(client, userdata, msg) -> None:
         elif topic == "xonix/game/difficulty" and payload in DIFFICULTY_PRESETS:
             mqtt_state.difficulty = payload
             mqtt_state.control = "restart"  # смена сложности на лету — новый раунд с новыми параметрами
-        elif topic == "xonix/game/p1/strategy_active" and payload in ("smart", "simple"):
-            mqtt_state.strategy["p1"] = payload
-        elif topic == "xonix/game/p2/strategy_active" and payload in ("smart", "simple"):
-            mqtt_state.strategy["p2"] = payload
         elif topic == "xonix/game/p1/llm_provider" and payload in ("off", "haiku", "kimi"):
             mqtt_state.llm_provider["p1"] = payload
         elif topic == "xonix/game/p2/llm_provider" and payload in ("off", "haiku", "kimi"):
@@ -271,8 +300,6 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/mode", qos=1)
     client.subscribe("xonix/game/control", qos=1)
     client.subscribe("xonix/game/difficulty", qos=1)
-    client.subscribe("xonix/game/p1/strategy_active", qos=0)
-    client.subscribe("xonix/game/p2/strategy_active", qos=0)
     client.subscribe("xonix/game/p1/llm_provider", qos=0)
     client.subscribe("xonix/game/p2/llm_provider", qos=0)
     client.subscribe("xonix/game/p1/llm_usage", qos=0)
@@ -528,6 +555,38 @@ def _get_hud_font(size: int) -> ImageFont.FreeTypeFont | None:
 _ORDER_RU = {"expand": "расширение", "raid": "набег", "defend": "оборона", "regroup": "перегруппировка"}
 _PHASE_RU = {"playing": "идёт", "paused": "пауза", "gameover": "конец раунда"}
 
+def _draw_rounded_rect(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], radius: int, fill: tuple[int, int, int, int] | None = None, outline: tuple[int, int, int, int] | None = None, width: int = 1) -> None:
+    x0, y0, x1, y1 = xy
+    if fill is not None:
+        draw.rectangle([x0 + radius, y0, x1 - radius, y1], fill=fill)
+        draw.rectangle([x0, y0 + radius, x1, y1 - radius], fill=fill)
+        draw.pieslice([x0, y0, x0 + radius * 2, y0 + radius * 2], 180, 270, fill=fill)
+        draw.pieslice([x1 - radius * 2, y0, x1, y0 + radius * 2], 270, 360, fill=fill)
+        draw.pieslice([x0, y1 - radius * 2, x0 + radius * 2, y1], 90, 180, fill=fill)
+        draw.pieslice([x1 - radius * 2, y1 - radius * 2, x1, y1], 0, 90, fill=fill)
+    if outline is not None:
+        # одна непрерывная линия: дуги по углам + прямые рёбра, без наложения
+        # обводок друг на друга (раньше рамка складывалась из перекрывающихся
+        # прямоугольников/pieslice, каждый со своей обводкой — визуально
+        # двоилась) — по прямому запросу пользователя убрать двойную рамку.
+        draw.arc([x0, y0, x0 + radius * 2, y0 + radius * 2], 180, 270, fill=outline, width=width)
+        draw.arc([x1 - radius * 2, y0, x1, y0 + radius * 2], 270, 360, fill=outline, width=width)
+        draw.arc([x0, y1 - radius * 2, x0 + radius * 2, y1], 90, 180, fill=outline, width=width)
+        draw.arc([x1 - radius * 2, y1 - radius * 2, x1, y1], 0, 90, fill=outline, width=width)
+        draw.line([x0 + radius, y0, x1 - radius, y0], fill=outline, width=width)
+        draw.line([x0 + radius, y1, x1 - radius, y1], fill=outline, width=width)
+        draw.line([x0, y0 + radius, x0, y1 - radius], fill=outline, width=width)
+        draw.line([x1, y0 + radius, x1, y1 - radius], fill=outline, width=width)
+
+
+def _blend_block(canvas: np.ndarray, block: Image.Image, x0: int, y0: int) -> None:
+    block_rgba = np.array(block, dtype=np.float32)
+    alpha = block_rgba[:, :, 3:4] / 255.0
+    block_bgr = block_rgba[:, :, [2, 1, 0]]
+    w, h = block.size
+    region = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
+    canvas[y0:y0 + h, x0:x0 + w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+
 
 def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> list[str]:
     """Заголовок — только имя игрока, ВСЁ остальное разбито по категориям
@@ -535,33 +594,33 @@ def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> li
     строкой ("столбик", по прямому запросу пользователя). Категории —
     заголовки без отступа, детали внутри — с отступом (см. _render_player_
     block: заголовок получает более высокую альфу, чтобы визуально
-    отличаться от деталей). Партия/сложность/цель/фаза дублируются в обоих
-    блоках по прямому запросу пользователя — весь текст читается из
-    одного блока, не нужно смотреть на оба сразу."""
+    отличаться от деталей). Сложность/цель/фаза — общие для партии, не
+    per-player — вынесены в верхний блок (_render_version_block), здесь
+    остаётся только то, что различается по игрокам (территория, победы)."""
     name = "Голубой" if player == "p1" else "Жёлтый"
     if mqtt_state.is_human(player):
         who = "человек"
     else:
-        strat = "умный" if mqtt_state.strategy[player] == "smart" else "простой"
+        # Стратегия ИИ теперь одна (strategy_smart) — раньше здесь ещё
+        # различали "умный"/"простой", убрано вместе с переключателем
+        # switch.ksoniks_umnyi_bot_p{1,2} по прямому запросу пользователя
+        # (2026-08-23).
         provider = mqtt_state.llm_provider[player]
         if provider == "off":
-            who = f"бот: {strat}"
+            who = "бот"
         else:
             # Реальная модель из последнего вызова (usage["model"]), а не
             # просто название провайдера — по прямому запросу пользователя
             # ("какая именно сейчас модель работает"). Пока первый вызов ещё
             # не пришёл — временно название провайдера, не пусто.
             model = mqtt_state.llm_usage[player].get("model", provider.capitalize())
-            who = f"бот: {strat}+{model}"
+            who = f"бот+{model}"
 
     lines = [name, "Игрок", f"    {who}"]
 
     lines.append("Партия")
     lines.append(f"    территория: {field.percent(player):.1f}%")
     lines.append(f"    побед: {wins[player]}")
-    lines.append(f"    сложность: {mqtt_state.difficulty}")
-    lines.append(f"    цель: {field.target_percent():.0f}%")
-    lines.append(f"    фаза: {_PHASE_RU.get(phase, phase)}")
 
     provider = mqtt_state.llm_provider[player]
     if not mqtt_state.is_human(player) and provider != "off":
@@ -610,21 +669,75 @@ def _render_player_block(lines: list[str], font: ImageFont.FreeTypeFont, small_f
 
     block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(block)
-    draw.rectangle([0, 0, box_w, box_h], fill=(0, 0, 0, 130))
+    _draw_rounded_rect(draw, [0, 0, box_w - 1, box_h - 1], 8, outline=color, width=1)
+    
     y = pad_y
     for (text, f, c), h in zip(rows, heights):
-        draw.text((pad_x, y), text, font=f, fill=c)
+        draw.text((pad_x, y), text, font=f, fill=c, stroke_width=1, stroke_fill=(0,0,0))
         y += h + line_gap
     return block
 
+def _render_version_block(font: ImageFont.FreeTypeFont, small_font: ImageFont.FreeTypeFont, field: "Field", phase: str) -> Image.Image:
+    """Верхний общий блок — параметры партии, единые для обоих игроков
+    (сложность/цель/фаза), а не per-player, поэтому вынесены сюда из
+    _player_hud_lines. Переиспользует _render_player_block вместо
+    дублирования отрисовки рамки/текста."""
+    lines = [
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        "Партия",
+        f"    сложность: {mqtt_state.difficulty}",
+        f"    цель: {field.target_percent():.0f}%",
+        f"    фаза: {_PHASE_RU.get(phase, phase)}",
+    ]
+    return _render_player_block(lines, font, small_font, (0, 255, 0))
 
-def _blend_block(canvas: np.ndarray, block: Image.Image, x0: int, y0: int) -> None:
-    block_rgba = np.array(block, dtype=np.float32)
-    alpha = block_rgba[:, :, 3:4] / 255.0
-    block_bgr = block_rgba[:, :, [2, 1, 0]]
-    w, h = block.size
-    region = canvas[y0:y0 + h, x0:x0 + w].astype(np.float32)
-    canvas[y0:y0 + h, x0:x0 + w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+
+CPU_COLOR = (186, 130, 240)  # сиреневый — по прямому запросу пользователя
+
+
+def _render_cpu_block(font: ImageFont.FreeTypeFont) -> Image.Image:
+    """Нижний центральный блок — график загрузки CPU за последние
+    CPU_HISTORY_SECONDS (4 минуты), по прямому запросу пользователя.
+    Данные копит cpu_monitor() в фоновом потоке (/proc/stat, только
+    stdlib). Окно графика фиксированное (сейчас − 4 мин), а не "от первого
+    сэмпла" — так партия, которая идёт меньше 4 минут, честно показывает
+    пустой левый край, а не растянутый на всю ширину короткий отрезок."""
+    with cpu_history_lock:
+        samples = list(cpu_history)
+
+    color = CPU_COLOR
+    pad_x, pad_y = 14, 9
+    graph_w, graph_h = 200, 50
+    current = samples[-1][1] if samples else None
+    header = f"CPU: {current:.0f}%" if current is not None else "CPU: …"
+
+    tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    header_w = int(tmp.textlength(header, font=font))
+    box_w = max(graph_w, header_w) + pad_x * 2
+    box_h = pad_y * 2 + font.size + 6 + graph_h
+
+    block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(block)
+    _draw_rounded_rect(draw, [0, 0, box_w - 1, box_h - 1], 8, outline=color, width=1)
+    draw.text((pad_x, pad_y), header, font=font, fill=(*color, 255), stroke_width=1, stroke_fill=(0, 0, 0))
+
+    gx0 = (box_w - graph_w) // 2
+    gy0 = pad_y + font.size + 6
+    draw.rectangle([gx0, gy0, gx0 + graph_w, gy0 + graph_h], outline=(*color, 120), width=1)
+
+    if len(samples) >= 2:
+        t1 = samples[-1][0]
+        t0 = t1 - CPU_HISTORY_SECONDS
+        points = [
+            (
+                gx0 + max(0.0, ts - t0) / CPU_HISTORY_SECONDS * graph_w,
+                gy0 + graph_h - min(100.0, pct) / 100.0 * graph_h,
+            )
+            for ts, pct in samples
+        ]
+        draw.line(points, fill=(*color, 255), width=2)
+
+    return block
 
 
 def draw_hud(canvas: np.ndarray, field: "Field", wins: dict, phase: str) -> np.ndarray:
@@ -654,6 +767,16 @@ def draw_hud(canvas: np.ndarray, field: "Field", wins: dict, phase: str) -> np.n
 
     _blend_block(canvas, p1_block, p1_x0, p1_y0)
     _blend_block(canvas, p2_block, p2_x0, p2_y0)
+
+    version_block = _render_version_block(font, small_font, field, phase)
+    version_x0 = (CANVAS_W - version_block.size[0]) // 2
+    version_y0 = 10  # Some padding from the top
+    _blend_block(canvas, version_block, version_x0, version_y0)
+
+    cpu_block = _render_cpu_block(small_font)
+    cpu_x0 = (CANVAS_W - cpu_block.size[0]) // 2
+    cpu_y0 = CANVAS_H - cpu_block.size[1] - 10
+    _blend_block(canvas, cpu_block, cpu_x0, cpu_y0)
     return canvas
 
 
@@ -719,6 +842,7 @@ def render(field: Field) -> np.ndarray:
 def main() -> None:
     for name, cmd in CAMERAS.items():
         threading.Thread(target=camera_reader, args=(name, cmd), daemon=True).start()
+    threading.Thread(target=cpu_monitor, daemon=True).start()
 
     client = start_mqtt()
 

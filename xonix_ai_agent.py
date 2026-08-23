@@ -8,23 +8,18 @@
 содержит игровой логики ИИ вообще — она целиком здесь, в отдельном
 процессе, который можно заменить/расширить не трогая движок.
 
-Запуск: python3 xonix_ai_agent.py p1|p2 [--strategy smart|simple]
-Стратегию также можно переключить на лету с дашборда — топик
-xonix/game/p{N}/strategy (retained), агент подписан и переключается
-без перезапуска.
+Запуск: python3 xonix_ai_agent.py p1|p2
 
-Стратегии:
-- smart  — три фазы (exiting/raiding/returning), уклонение от шариков и
-  соперника, цель набега на безопасном удалении. Перенесена без
-  изменений логики из первой версии движка (см. историю коммитов
-  xonix_game.py и project_xonix_cameras_composite.md) — там же разбор
-  багов, из-за которых первая версия зависала.
-- simple — гораздо более тупой бот: почти случайное блуждание с только
-  базовым уклонением от шариков, без цели и без осмысленного возврата
-  домой. Настоящая "лёгкая" стратегия для выбора на дашборде, а не
-  формальная вторая позиция в списке.
+Стратегия одна — strategy_smart(): три фазы (exiting/raiding/returning),
+уклонение от шариков и соперника, цель набега на безопасном удалении.
+Перенесена без изменений логики из первой версии движка (см. историю
+коммитов xonix_game.py и project_xonix_cameras_composite.md) — там же
+разбор багов, из-за которых первая версия зависала. Была ещё вторая,
+"простая" (strategy_simple, почти случайное блуждание) — убрана целиком
+по прямому запросу пользователя (2026-08-23), вместе с переключателем
+switch.ksoniks_umnyi_bot_p{1,2} на дашборде.
 
-Третий, необязательный уровень — xonix_llm_strategist.py: раз в ~20с
+Необязательный второй уровень — xonix_llm_strategist.py: раз в ~20с
 спрашивает настоящую LLM (Claude Haiku / Kimi) "как в целом играть" по
 тексту-"характеру" от пользователя (плюс контекст общего и своего приватного
 чата — см. xonix_chat_hub.py) и публикует в xonix/game/p{N}/llm_params
@@ -41,7 +36,6 @@ xonix/game/p{N}/strategy (retained), агент подписан и перекл
 import argparse
 import json
 import math
-import random
 import sys
 import threading
 import time
@@ -126,32 +120,6 @@ class BoardState:
             )
 
 
-def strategy_simple(player: str, board: BoardState) -> str:
-    """Тупой бот: случайное направление с базовым уклонением от шариков,
-    без цели и без плана возврата — настоящая "лёгкая" стратегия."""
-    snap = board.snapshot()
-    if snap is None:
-        return "right"
-    grid, gw, gh, cursor, trail_len, last_dir, balls = snap
-    cx, cy = cursor[player]
-
-    candidates = []
-    for d, (dx, dy) in DIRS.items():
-        nx, ny = cx + dx, cy + dy
-        if nx < 0 or ny < 0 or nx >= gw or ny >= gh:
-            continue
-        # чужая территория теперь тоже отвоёвывается — не блокируем движение
-        score = random.uniform(0, 1)
-        for bx, by in balls:
-            dist = math.hypot(bx - nx, by - ny)
-            if dist < 4:
-                score -= (4 - dist)
-        candidates.append((score, d))
-    if not candidates:
-        return last_dir.get(player, "right")
-    return max(candidates)[1]
-
-
 # Приказ (order) от xonix_llm_strategist.py — НАСТОЯЩИЙ канал управления:
 # дальность/длительность набега и вес бонуса за вторжение на чужую
 # территорию реально меняются, это не просто текст поверх старого
@@ -203,18 +171,29 @@ def _can_escape(grid, gw, gh, sx, sy, player) -> bool:
 
 
 def _pick_raid_target(grid, gw, gh, cx, cy, balls, dist_range=(8, 20)):
+    """Детерминированный выбор цели набега — самая безопасная (дальше всех
+    от шариков) НЕЗАНЯТАЯ клетка среди ВСЕХ, попадающих в dist_range, а не
+    случайная выборка из 20 проб. Убрано по прямому запросу пользователя
+    (2026-08-23) вместе с остальной случайностью в strategy_smart —
+    полный перебор по сетке 80×45 векторизован через numpy, не питоновским
+    двойным циклом (та же техника, что уже у exiting/heading_home ниже)."""
     lo, hi = dist_range
-    best_pt, best_safety = None, -1e9
-    for _ in range(20):
-        tx = random.randint(1, gw - 2)
-        ty = random.randint(1, gh - 2)
-        dist = math.hypot(cx - tx, cy - ty)
-        if grid[tx, ty] != EMPTY or dist < lo or dist > hi:
-            continue
-        safety = min((math.hypot(bx - tx, by - ty) for bx, by in balls), default=99.0)
-        if safety > best_safety:
-            best_safety, best_pt = safety, (tx, ty)
-    return best_pt
+    xs, ys = np.where(grid == EMPTY)
+    if len(xs) == 0:
+        return None
+    dist = np.hypot(xs - cx, ys - cy)
+    mask = (dist >= lo) & (dist <= hi)
+    xs, ys = xs[mask], ys[mask]
+    if len(xs) == 0:
+        return None
+    if balls:
+        bxs = np.array([bx for bx, _ in balls])
+        bys = np.array([by for _, by in balls])
+        safety = np.hypot(xs[:, None] - bxs[None, :], ys[:, None] - bys[None, :]).min(axis=1)
+    else:
+        safety = np.full(len(xs), 99.0)
+    best_idx = int(np.argmax(safety))
+    return int(xs[best_idx]), int(ys[best_idx])
 
 
 def strategy_smart(player: str, board: BoardState) -> str:
@@ -273,7 +252,11 @@ def strategy_smart(player: str, board: BoardState) -> str:
             # прямому запросу пользователя "сделать умного бота ещё умнее".
             continue
         # чужая территория теперь тоже отвоёвывается — не блокируем движение
-        score = random.uniform(0, 1) * 0.2
+        # Раньше здесь была случайная затравка (random.uniform(0,1)*0.2) для
+        # разбивания ничьих между направлениями — убрана по прямому запросу
+        # пользователя (2026-08-23): при равенстве реальных эвристик max()
+        # стабильно берёт первый по порядку в DIRS кандидат.
+        score = 0.0
         # Мягкий штраф за БЛИЗОСТЬ к собственному следу (не только прямое
         # столкновение — то уже отсеяно continue выше). Без этого бот
         # проходит вплотную к своему хвосту и упирается в него уже в
@@ -331,19 +314,13 @@ def strategy_smart(player: str, board: BoardState) -> str:
     return best_d
 
 
-STRATEGIES = {"smart": strategy_smart, "simple": strategy_simple}
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("player", choices=["p1", "p2"])
-    parser.add_argument("--strategy", choices=list(STRATEGIES), default="smart")
     args = parser.parse_args()
     player = args.player
 
     board = BoardState()
-    state = {"strategy": args.strategy}
-    state_lock = threading.Lock()
 
     def on_message(client, userdata, msg) -> None:
         if msg.topic == "xonix/game/board":
@@ -351,14 +328,6 @@ def main() -> None:
                 board.update(json.loads(msg.payload))
             except Exception:
                 pass
-        elif msg.topic == f"xonix/game/{player}/strategy":
-            payload = msg.payload.decode("utf-8", errors="ignore").strip()
-            if payload in STRATEGIES:
-                with state_lock:
-                    changed = state["strategy"] != payload
-                    state["strategy"] = payload
-                if changed:
-                    client.publish(f"xonix/game/{player}/strategy_active", payload, qos=0, retain=True)
         elif msg.topic == f"xonix/game/{player}/llm_params":
             # публикует xonix_llm_strategist.py раз в ~20с — не решение хода,
             # а настройка "характера" strategy_smart (см. её докстринг)
@@ -376,13 +345,8 @@ def main() -> None:
     client.on_message = on_message
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
     client.subscribe("xonix/game/board", qos=0)
-    client.subscribe(f"xonix/game/{player}/strategy", qos=1)
     client.subscribe(f"xonix/game/{player}/llm_params", qos=0)
     client.loop_start()
-    # подтверждаем реально применённую стратегию сразу при старте (не только
-    # при смене) — иначе дашборд не знает актуальное значение по умолчанию,
-    # пока кто-то хоть раз не нажал кнопку
-    client.publish(f"xonix/game/{player}/strategy_active", args.strategy, qos=0, retain=True)
 
     start_ts = time.monotonic()
     while True:
@@ -398,9 +362,7 @@ def main() -> None:
             # движок был, но замолчал — упал/убит, держаться за мёртвую игру незачем
             return
 
-        with state_lock:
-            strategy_name = state["strategy"]
-        direction = STRATEGIES[strategy_name](player, board)
+        direction = strategy_smart(player, board)
         client.publish(f"xonix/game/{player}/ai_move", direction, qos=0)
         dt = DECIDE_PERIOD - (time.monotonic() - t0)
         if dt > 0:
