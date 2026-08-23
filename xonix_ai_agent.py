@@ -364,6 +364,14 @@ def main() -> None:
 
         direction = strategy_smart(player, board)
         client.publish(f"xonix/game/{player}/ai_move", direction, qos=0)
+        # Цель набега — только для HUD (подсветка при включённом "автофокусе"
+        # на дашборде), сама логика движения её не читает отсюда.
+        target = board.raid_target
+        client.publish(
+            f"xonix/game/{player}/raid_target",
+            json.dumps({"x": target[0], "y": target[1]}) if target else "",
+            qos=0, retain=True,
+        )
         dt = DECIDE_PERIOD - (time.monotonic() - t0)
         if dt > 0:
             time.sleep(dt)

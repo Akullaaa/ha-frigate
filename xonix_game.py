@@ -83,7 +83,7 @@ BASE_SIZE = 6  # размер стартовой базы каждого игр�
 DIFFICULTY_PRESETS = {
     "easy":   {"target_percent": 30, "num_balls": 4, "speed": (0.10, 0.16)},
     "normal": {"target_percent": 45, "num_balls": 6, "speed": (0.12, 0.20)},
-    "hard":   {"target_percent": 60, "num_balls": 9, "speed": (0.16, 0.26)},
+    "hard":   {"target_percent": 34, "num_balls": 9, "speed": (0.16, 0.26)},
 }
 
 EMPTY, P1_TERRITORY, P2_TERRITORY, P1_TRAIL, P2_TRAIL = 0, 1, 2, 3, 4
@@ -209,6 +209,22 @@ class MqttState:
         self.llm_interval: dict[str, float | None] = {"p1": None, "p2": None}  # DECIDE_INTERVAL стратега, для HUD
         self.llm_params: dict[str, dict] = {"p1": {}, "p2": {}}  # order/aggression/caution, для HUD
 
+        # Игровые "PTZ"-переключатели — по прямому запросу пользователя
+        # переиспользуют тематику реальных ONVIF-переключателей камер
+        # (автофокус/ИК-подсветка/стеклоочиститель), но НЕ трогают сами
+        # ONVIF-сущности камер (те управляют настоящим железом, портить
+        # реальную запись/ночное видение ради игры не стали).
+        self.autofocus: dict[str, bool] = {"p1": False, "p2": False}  # подсветка цели набега на HUD
+        self.ir_lamp: dict[str, bool] = {"p1": False, "p2": False}  # яркая подсветка своей территории
+        self.raid_target: dict[str, tuple[int, int] | None] = {"p1": None, "p2": None}  # публикует xonix_ai_agent.py
+        self.wiper_pending: dict[str, bool] = {"p1": False, "p2": False}  # экстренный отзыв набега (только человек)
+
+    def pop_wiper(self, player: str) -> bool:
+        with self.lock:
+            w = self.wiper_pending[player]
+            self.wiper_pending[player] = False
+            return w
+
     def is_human(self, player: str) -> bool:
         with self.lock:
             mode = self.mode[player]
@@ -285,6 +301,21 @@ def on_mqtt_message(client, userdata, msg) -> None:
                 mqtt_state.llm_params["p1" if "p1" in topic else "p2"] = json.loads(payload)
             except json.JSONDecodeError:
                 pass
+        elif topic in ("xonix/game/p1/autofocus", "xonix/game/p2/autofocus"):
+            mqtt_state.autofocus["p1" if "p1" in topic else "p2"] = payload == "ON"
+        elif topic in ("xonix/game/p1/ir_lamp", "xonix/game/p2/ir_lamp"):
+            mqtt_state.ir_lamp["p1" if "p1" in topic else "p2"] = payload == "ON"
+        elif topic in ("xonix/game/p1/raid_target", "xonix/game/p2/raid_target"):
+            player = "p1" if "p1" in topic else "p2"
+            try:
+                d = json.loads(payload) if payload else None
+                mqtt_state.raid_target[player] = (d["x"], d["y"]) if d else None
+            except (json.JSONDecodeError, KeyError):
+                pass
+        elif topic in ("xonix/game/p1/wiper", "xonix/game/p2/wiper"):
+            # Момент действия, не retained-состояние — "стеклоочиститель"
+            # экстренно отзывает набег ТОЛЬКО у человека (см. main()).
+            mqtt_state.wiper_pending["p1" if "p1" in topic else "p2"] = True
 
 
 def start_mqtt() -> mqtt.Client:
@@ -310,6 +341,14 @@ def start_mqtt() -> mqtt.Client:
     client.subscribe("xonix/game/p2/llm_interval", qos=0)
     client.subscribe("xonix/game/p1/llm_params", qos=0)
     client.subscribe("xonix/game/p2/llm_params", qos=0)
+    client.subscribe("xonix/game/p1/autofocus", qos=0)
+    client.subscribe("xonix/game/p2/autofocus", qos=0)
+    client.subscribe("xonix/game/p1/ir_lamp", qos=0)
+    client.subscribe("xonix/game/p2/ir_lamp", qos=0)
+    client.subscribe("xonix/game/p1/raid_target", qos=0)
+    client.subscribe("xonix/game/p2/raid_target", qos=0)
+    client.subscribe("xonix/game/p1/wiper", qos=0)
+    client.subscribe("xonix/game/p2/wiper", qos=0)
     client.loop_start()
     return client
 
@@ -588,15 +627,17 @@ def _blend_block(canvas: np.ndarray, block: Image.Image, x0: int, y0: int) -> No
     canvas[y0:y0 + h, x0:x0 + w] = (block_bgr * alpha + region * (1 - alpha)).astype(np.uint8)
 
 
-def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> list[str]:
-    """Заголовок — только имя игрока, ВСЁ остальное разбито по категориям
-    (Игрок / Партия / Стратегия / Токены), каждое значение отдельной
-    строкой ("столбик", по прямому запросу пользователя). Категории —
-    заголовки без отступа, детали внутри — с отступом (см. _render_player_
-    block: заголовок получает более высокую альфу, чтобы визуально
-    отличаться от деталей). Сложность/цель/фаза — общие для партии, не
-    per-player — вынесены в верхний блок (_render_version_block), здесь
-    остаётся только то, что различается по игрокам (территория, победы)."""
+def _player_hud_lines(player: str, phase: str) -> list[str]:
+    """Заголовок — только имя игрока, остальное разбито по категориям
+    (Игрок / Стратегия / Токены), каждое значение отдельной строкой
+    ("столбик", по прямому запросу пользователя). Категории — заголовки
+    без отступа, детали внутри — с отступом (см. _render_player_block:
+    заголовок получает более высокую альфу, чтобы визуально отличаться от
+    деталей). Территория теперь прогресс-баром (см. _render_player_block,
+    percent), победы — только в общем табло счёта внизу экрана; раздел
+    "Партия" тут убран целиком по прямому запросу пользователя, сложность/
+    цель/фаза и так уже были в отдельном верхнем/нижнем общем блоке
+    (_render_version_block)."""
     name = "Голубой" if player == "p1" else "Жёлтый"
     if mqtt_state.is_human(player):
         who = "человек"
@@ -617,10 +658,6 @@ def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> li
             who = f"бот+{model}"
 
     lines = [name, "Игрок", f"    {who}"]
-
-    lines.append("Партия")
-    lines.append(f"    территория: {field.percent(player):.1f}%")
-    lines.append(f"    побед: {wins[player]}")
 
     provider = mqtt_state.llm_provider[player]
     if not mqtt_state.is_human(player) and provider != "off":
@@ -654,26 +691,64 @@ def _player_hud_lines(player: str, field: "Field", wins: dict, phase: str) -> li
     return lines
 
 
-def _render_player_block(lines: list[str], font: ImageFont.FreeTypeFont, small_font: ImageFont.FreeTypeFont, color: tuple[int, int, int]) -> Image.Image:
+def _render_player_block(
+    lines: list[str],
+    font: ImageFont.FreeTypeFont,
+    small_font: ImageFont.FreeTypeFont,
+    color: tuple[int, int, int],
+    percent: float | None = None,
+) -> Image.Image:
+    """lines[0] — имя/заголовок, остальное — категории/детали столбиком.
+    Если передан percent — сразу под именем рисуется прогресс-бар
+    территории (контур = 100%, заливка пропорциональна проценту) вместо
+    текстовой строки "территория: X%" — по прямому запросу пользователя,
+    раздел "Партия" (территория+победы) убран из _player_hud_lines,
+    победы теперь только в общем табло счёта внизу экрана."""
     rows = [(lines[0], font, (*color, 255))]
     # Заголовок категории — без отступа "    ", в отличие от строк-деталей —
     # получает более высокую альфу, чтобы визуально выделяться как группа.
     rows += [(t, small_font, (*color, 200 if t.startswith("    ") else 235)) for t in lines[1:]]
 
     pad_x, pad_y, line_gap = 14, 9, 4
+    bar_w, bar_h, bar_gap = 150, 14, 8
+    pct_label_w = 46  # запас под "100%" после бара
+
     tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     widths = [tmp.textlength(text, font=f) for text, f, _ in rows]
     heights = [f.size + 4 for _, f, _ in rows]
-    box_w = int(max(widths)) + pad_x * 2
+
+    content_w = max(widths) if widths else 0
+    if percent is not None:
+        content_w = max(content_w, bar_w + pct_label_w)
+    box_w = int(content_w) + pad_x * 2
     box_h = sum(heights) + line_gap * (len(rows) - 1) + pad_y * 2
+    if percent is not None:
+        box_h += bar_h + bar_gap
 
     block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(block)
     _draw_rounded_rect(draw, [0, 0, box_w - 1, box_h - 1], 8, outline=color, width=1)
-    
+
     y = pad_y
-    for (text, f, c), h in zip(rows, heights):
-        draw.text((pad_x, y), text, font=f, fill=c, stroke_width=1, stroke_fill=(0,0,0))
+    # Имя игрока — первая строка отдельно, чтобы бар встал сразу под ней.
+    name_text, name_font, name_color = rows[0]
+    draw.text((pad_x, y), name_text, font=name_font, fill=name_color, stroke_width=1, stroke_fill=(0, 0, 0))
+    y += heights[0] + line_gap
+
+    if percent is not None:
+        bx0, by0 = pad_x, y
+        fill_w = int(bar_w * min(100.0, max(0.0, percent)) / 100.0)
+        if fill_w > 0:
+            draw.rectangle([bx0, by0, bx0 + fill_w, by0 + bar_h], fill=(*color, 200))
+        draw.rectangle([bx0, by0, bx0 + bar_w, by0 + bar_h], outline=color, width=1)
+        draw.text(
+            (bx0 + bar_w + 6, by0 - 1), f"{percent:.0f}%", font=small_font,
+            fill=(*color, 255), stroke_width=1, stroke_fill=(0, 0, 0),
+        )
+        y += bar_h + bar_gap
+
+    for (text, f, c), h in zip(rows[1:], heights[1:]):
+        draw.text((pad_x, y), text, font=f, fill=c, stroke_width=1, stroke_fill=(0, 0, 0))
         y += h + line_gap
     return block
 
@@ -696,8 +771,9 @@ CPU_COLOR = (186, 130, 240)  # сиреневый — по прямому зап
 
 
 def _render_cpu_block(font: ImageFont.FreeTypeFont) -> Image.Image:
-    """Нижний центральный блок — график загрузки CPU за последние
-    CPU_HISTORY_SECONDS (4 минуты), по прямому запросу пользователя.
+    """Блок по центру экрана — график загрузки CPU за последние
+    CPU_HISTORY_SECONDS (4 минуты), по прямому запросу пользователя
+    (раньше был внизу по центру — туда переехало табло счёта).
     Данные копит cpu_monitor() в фоновом потоке (/proc/stat, только
     stdlib). Окно графика фиксированное (сейчас − 4 мин), а не "от первого
     сэмпла" — так партия, которая идёт меньше 4 минут, честно показывает
@@ -740,63 +816,105 @@ def _render_cpu_block(font: ImageFont.FreeTypeFont) -> Image.Image:
     return block
 
 
+def _render_scoreboard_block(font: ImageFont.FreeTypeFont, wins: dict) -> Image.Image:
+    """Счёт побед по центру внизу экрана, отдельно от остальной статистики
+    в боковых блоках — классический вид табло, как обычно в играх,
+    по прямому запросу пользователя."""
+    p1_color = (0, 200, 255)
+    p2_color = (255, 200, 0)
+    parts = [
+        ("Голубой", (*p1_color, 255)),
+        (f" {wins.get('p1', 0)} : {wins.get('p2', 0)} ", (255, 255, 255, 255)),
+        ("Жёлтый", (*p2_color, 255)),
+    ]
+
+    tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    widths = [tmp.textlength(text, font=font) for text, _ in parts]
+    pad_x, pad_y = 16, 10
+    box_w = int(sum(widths)) + pad_x * 2
+    box_h = font.size + pad_y * 2 + 6
+
+    block = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(block)
+    _draw_rounded_rect(draw, [0, 0, box_w - 1, box_h - 1], 8, outline=(255, 255, 255), width=1)
+
+    x = pad_x
+    for text, color in parts:
+        draw.text((x, pad_y), text, font=font, fill=color, stroke_width=1, stroke_fill=(0, 0, 0))
+        x += tmp.textlength(text, font=font)
+    return block
+
+
 def draw_hud(canvas: np.ndarray, field: "Field", wins: dict, phase: str) -> np.ndarray:
-    """Два независимых полупрозрачных столбика — Голубой СЛЕВА, Жёлтый
-    СПРАВА (по прямой просьбе пользователя: "покажи данные столбик по
-    каждому игроку справа и слева" — раньше был один общий блок по центру
-    с обоими игроками друг под другом). Каждый центрирован в своей четверти
-    экрана по вертикали независимо от другого. Данные разбиты по категориям
-    (Игрок/Партия/Стратегия/Токены, см. _player_hud_lines) — по прямому
-    запросу пользователя, раньше это был плоский список без группировки.
-    Рисуется прямо на кадре (не карточкой на дашборде HA) —
-    по прямому запросу "информацию... показывать в потоке", полупрозрачно,
-    чтобы не закрывать игровое поле под собой."""
+    """Блоки по игрокам — вверху по краям (Голубой слева, Жёлтый справа),
+    блок партии (время/сложность/цель/фаза) и табло счёта — внизу по
+    центру друг над другом, график CPU — по центру экрана. Раскладка
+    менялась по прямому запросу пользователя несколько раз (изначально
+    игроки были по центру каждой четверти, "Партия" — вверху по центру).
+    Данные разбиты по категориям (Игрок/Партия/Стратегия/Токены, см.
+    _player_hud_lines). Рисуется прямо на кадре (не карточкой на дашборде
+    HA), полупрозрачно, чтобы не закрывать игровое поле под собой."""
     font = _get_hud_font(18)
     small_font = _get_hud_font(14)
     if font is None or small_font is None:
         return canvas  # шрифта нет — тихо пропускаем HUD, не роняем поток
 
-    p1_block = _render_player_block(_player_hud_lines("p1", field, wins, phase), font, small_font, (0, 200, 255))
-    p2_block = _render_player_block(_player_hud_lines("p2", field, wins, phase), font, small_font, (255, 200, 0))
+    p1_block = _render_player_block(_player_hud_lines("p1", phase), font, small_font, (0, 200, 255), percent=field.percent("p1"))
+    p2_block = _render_player_block(_player_hud_lines("p2", phase), font, small_font, (255, 200, 0), percent=field.percent("p2"))
 
-    quarter = CANVAS_W // 4
-    p1_x0 = quarter - p1_block.size[0] // 2
-    p1_y0 = (CANVAS_H - p1_block.size[1]) // 2
-    p2_x0 = (CANVAS_W - quarter) - p2_block.size[0] // 2
-    p2_y0 = (CANVAS_H - p2_block.size[1]) // 2
+    # Инфо по игрокам — наверху по краям (не по центру четверти, как
+    # раньше), по прямому запросу пользователя.
+    margin = 10
+    p1_x0, p1_y0 = margin, margin
+    p2_x0, p2_y0 = CANVAS_W - p2_block.size[0] - margin, margin
 
     _blend_block(canvas, p1_block, p1_x0, p1_y0)
     _blend_block(canvas, p2_block, p2_x0, p2_y0)
 
-    version_block = _render_version_block(font, small_font, field, phase)
-    version_x0 = (CANVAS_W - version_block.size[0]) // 2
-    version_y0 = 10  # Some padding from the top
-    _blend_block(canvas, version_block, version_x0, version_y0)
-
     cpu_block = _render_cpu_block(small_font)
     cpu_x0 = (CANVAS_W - cpu_block.size[0]) // 2
-    cpu_y0 = CANVAS_H - cpu_block.size[1] - 10
+    cpu_y0 = (CANVAS_H - cpu_block.size[1]) // 2
     _blend_block(canvas, cpu_block, cpu_x0, cpu_y0)
+
+    # Инфо про партию (время/сложность/цель/фаза) и табло счёта — обе
+    # внизу по центру, друг над другом, по прямому запросу пользователя
+    # (раньше "Партия" была вверху по центру).
+    scoreboard_block = _render_scoreboard_block(font, wins)
+    scoreboard_x0 = (CANVAS_W - scoreboard_block.size[0]) // 2
+    scoreboard_y0 = CANVAS_H - scoreboard_block.size[1] - margin
+    _blend_block(canvas, scoreboard_block, scoreboard_x0, scoreboard_y0)
+
+    version_block = _render_version_block(font, small_font, field, phase)
+    version_x0 = (CANVAS_W - version_block.size[0]) // 2
+    version_y0 = scoreboard_y0 - version_block.size[1] - 8
+    _blend_block(canvas, version_block, version_x0, version_y0)
     return canvas
 
 
-def flash_win(stdout, game_frame: np.ndarray, color: tuple[int, int, int]) -> None:
-    """Три моргания цветом победителя во весь экран в момент победы —
-    по прямому запросу пользователя. Блокирует игровой цикл на доли
-    секунды (разовое событие раз в партию, не каждый кадр), между
-    цветными кадрами показывает уже отрисованный финальный кадр партии,
-    а не чёрный экран."""
+def flash_win(stdout, game_frame: np.ndarray, field: "Field", winner: str) -> None:
+    """Три мягких пульса подсветки ТОЛЬКО территории победителя в момент
+    победы — по прямому запросу пользователя (раньше моргал весь экран
+    жёстким соло-цветом, теперь только своя территория и плавным
+    треугольным пульсом альфы, не резким переключением solid/кадр).
+    Блокирует игровой цикл на доли секунды (разовое событие раз в
+    партию, не каждый кадр)."""
     period = 1.0 / FPS
-    solid = np.full((CANVAS_H, CANVAS_W, 3), color, dtype=np.uint8)
-    on_frames = max(1, FPS // 4)
-    off_frames = max(1, FPS // 4)
+    mask = upsample_mask(field.grid.T == TERRITORY_OF[winner])
+    color_layer = np.full((CANVAS_H, CANVAS_W, 3), PLAYER_COLOR[winner], dtype=np.float32)
+    base = game_frame.astype(np.float32)
+    masked_base = base[mask]
+    masked_color = color_layer[mask]
+
+    pulse_frames = max(2, FPS // 2)  # один пульс вверх-вниз
+    max_alpha = 0.55  # мягко — не полностью солидная заливка
+
     for _ in range(3):
-        for _ in range(on_frames):
-            stdout.write(solid.tobytes())
-            stdout.flush()
-            time.sleep(period)
-        for _ in range(off_frames):
-            stdout.write(game_frame.tobytes())
+        for i in range(pulse_frames):
+            t = i / (pulse_frames - 1)
+            alpha = max_alpha * (1 - abs(2 * t - 1))  # треугольная волна 0->max->0
+            frame = base.copy()
+            frame[mask] = masked_base * (1 - alpha) + masked_color * alpha
+            stdout.write(frame.astype(np.uint8).tobytes())
             stdout.flush()
             time.sleep(period)
 
@@ -811,6 +929,12 @@ def render(field: Field) -> np.ndarray:
         mask = upsample_mask(field.grid.T == TERRITORY_OF[player])  # .T: grid[x,y] -> [y,x] под изображение
         canvas[mask] = cam[player][mask]
 
+        # "ИК-подсветка" (игровой аналог ONVIF-переключателя камеры, не
+        # трогает реальную ИК-подсветку) — ярче подсвечивает свою
+        # территорию, по прямому запросу пользователя.
+        if mqtt_state.ir_lamp[player]:
+            canvas[mask] = np.clip(canvas[mask].astype(np.int16) + 45, 0, 255).astype(np.uint8)
+
         # тонкий контур по цвету игрока вдоль границы захваченной территории
         # — по прямому запросу пользователя, поверх уже закрашенной маски.
         contours, _ = cv2.findContours(mask.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -818,6 +942,15 @@ def render(field: Field) -> np.ndarray:
 
         trail_mask = upsample_mask(field.grid.T == TRAIL_OF[player])
         canvas[trail_mask] = color
+
+        # "Автофокус" — подсвечивает текущую цель набега бота (публикует
+        # xonix_ai_agent.py в p{N}/raid_target), кольцо+крест в цвете
+        # игрока поверх кадра.
+        if mqtt_state.autofocus[player] and mqtt_state.raid_target[player] is not None:
+            tx, ty = mqtt_state.raid_target[player]
+            tpx, tpy = tx * CELL + CELL // 2, ty * CELL + CELL // 2
+            cv2.circle(canvas, (tpx, tpy), CELL * 2, color, 2)
+            cv2.drawMarker(canvas, (tpx, tpy), color, markerType=cv2.MARKER_CROSS, markerSize=CELL * 3, thickness=2)
 
         # кубик игрока — окошко в его собственную камеру плюс цветная рамка команды
         cx, cy = field.cursor[player]
@@ -876,6 +1009,11 @@ def main() -> None:
 
         if phase == "playing":
             for player in ("p1", "p2"):
+                # "Стеклоочиститель" — экстренный отзыв набега, только для
+                # человека (у бота уже есть штатная логика heading_home,
+                # кнопка ему не нужна и не должна работать за него).
+                if mqtt_state.pop_wiper(player) and mqtt_state.is_human(player):
+                    field.die(player)
                 direction = mqtt_state.get_move(player) if mqtt_state.is_human(player) else mqtt_state.get_ai_move(player)
                 field.step(player, direction)
             field.step_balls_and_check()
@@ -899,7 +1037,7 @@ def main() -> None:
                     phase_until = t0 + 2.5
                     wins[player] += 1
                     save_wins(wins)
-                    flash_win(stdout, draw_hud(render(field), field, wins, phase), PLAYER_COLOR[player])
+                    flash_win(stdout, draw_hud(render(field), field, wins, phase), field, player)
         elif phase == "gameover" and t0 >= phase_until:
             field.reset()
             phase = "playing"
