@@ -1,2 +1,3 @@
 config.yaml filter=git-crypt diff=git-crypt
 device_credentials/* filter=git-crypt diff=git-crypt
+spalnia_geometry_bridge.sh filter=git-crypt diff=git-crypt
