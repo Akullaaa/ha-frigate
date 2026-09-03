@@ -21,16 +21,23 @@ MQTT-клиент на сокетах (CONNECT+PUBLISH QoS0), без paho-mqtt: 
 и не стоит тянуть внешнюю зависимость ради него.
 """
 import base64
+import collections
 import os
 import socket
 import sys
 import time
 import urllib.request
 
-URL = "http://10.0.0.49/axis-cgi/mjpg/video.cgi"
+URL = "http://192.168.77.16/axis-cgi/mjpg/video.cgi"
 USER, PASSWORD = "ahuserview", "bbbbbbb7"
 SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"
+
+# Живой FPS для оверлея (см. axis_2100_bridge.sh, drawtext:textfile=FPS_FILE:reload=1) —
+# скользящее среднее по времени прихода последних FPS_WINDOW кадров от самой камеры
+# (сырой источник, до апсемпла/лимита ffmpeg на выходе).
+FPS_FILE = "/tmp/axis_2100_fps.txt"
+FPS_WINDOW = 10
 
 MQTT_HOST, MQTT_PORT = "core-mosquitto", 1883
 MQTT_USER, MQTT_PASSWORD = "frigateu", "qqqqqqq7"
@@ -79,6 +86,11 @@ def mqtt_log(msg: str) -> None:
 
 def stream_frames() -> None:
     out = sys.stdout.buffer
+    try:
+        with open(FPS_FILE, "w") as f:
+            f.write("-- FPS")
+    except OSError:
+        pass
     mqtt_log("подключаюсь к камере")
     token = base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
     req = urllib.request.Request(URL, headers={"Authorization": f"Basic {token}"})
@@ -87,6 +99,7 @@ def stream_frames() -> None:
         first_frame = True
         frame_count = 0
         buf = bytearray()
+        frame_times: collections.deque = collections.deque(maxlen=FPS_WINDOW)
         while True:
             chunk = resp.read(8192)
             if not chunk:
@@ -109,6 +122,14 @@ def stream_frames() -> None:
                 out.flush()
                 del buf[:frame_end]
                 frame_count += 1
+                frame_times.append(time.monotonic())
+                if len(frame_times) >= 2:
+                    fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0])
+                    try:
+                        with open(FPS_FILE, "w") as f:
+                            f.write(f"{fps:.1f} FPS")
+                    except OSError:
+                        pass
                 if first_frame:
                     mqtt_log("первый кадр получен")
                     first_frame = False
