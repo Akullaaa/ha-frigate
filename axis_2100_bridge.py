@@ -42,7 +42,9 @@ FPS_WINDOW = 10
 MQTT_HOST, MQTT_PORT = "core-mosquitto", 1883
 MQTT_USER, MQTT_PASSWORD = "frigateu", "qqqqqqq7"
 MQTT_TOPIC = "axis_2100/bridge/event"
-HEARTBEAT_EVERY = 40  # кадров (~30-35с при апсемпленных 1.2fps)
+# 2026-09-11: раньше heartbeat шёл каждые 40 кадров — при реальных ~7 fps камеры это каждые
+# ~6 с, ~14 тыс. записей в логбук за сутки. Теперь по времени, раз в 5 минут.
+HEARTBEAT_SECONDS = 300
 
 
 def _remaining_length(n: int) -> bytes:
@@ -133,18 +135,39 @@ def stream_frames() -> None:
                 if first_frame:
                     mqtt_log("первый кадр получен")
                     first_frame = False
-                elif frame_count % HEARTBEAT_EVERY == 0:
+                    last_heartbeat = time.monotonic()
+                elif time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
                     mqtt_log(f"жив, кадров получено: {frame_count}")
+                    last_heartbeat = time.monotonic()
+
+
+RECONNECT_MIN, RECONNECT_MAX = 1, 60
 
 
 def main() -> None:
+    # 2026-09-11: 10 дней подряд мост крутился «подключаюсь → подключился → переподключение:
+    # [Errno 32] Broken pipe» раз в секунду — 3,7 млн срабатываний автоматизации логбука и
+    # 5 млн событий в базе recorder. Broken pipe на stdout означает, что ffmpeg/go2rtc на том
+    # конце уже умерли (сирота после рестарта потребителя) — переподключаться к камере
+    # бессмысленно, надо выйти: go2rtc сам перезапустит exec-источник, когда поток снова
+    # понадобится. Для остальных ошибок (камера недоступна) — экспоненциальная пауза
+    # 1→2→4…→60 с вместо фиксированной секунды, сброс после успешного первого кадра.
+    delay = RECONNECT_MIN
     while True:
         try:
             stream_frames()
+            delay = RECONNECT_MIN
+        except BrokenPipeError:
+            mqtt_log("потребитель закрыл поток (Broken pipe) — мост завершается")
+            print("axis_2100_bridge: stdout закрыт, выхожу", file=sys.stderr, flush=True)
+            os._exit(0)
         except Exception as exc:
-            mqtt_log(f"переподключение: {exc}")
+            mqtt_log(f"переподключение через {delay} с: {exc}")
             print(f"axis_2100_bridge: {exc}", file=sys.stderr, flush=True)
-        time.sleep(1)
+            time.sleep(delay)
+            delay = min(delay * 2, RECONNECT_MAX)
+            continue
+        time.sleep(RECONNECT_MIN)
 
 
 if __name__ == "__main__":
