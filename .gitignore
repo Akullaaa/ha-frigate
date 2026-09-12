@@ -18,3 +18,8 @@ xonix_chat_history.json
 xonix_wins.json
 xonix_llm_cost.json
 xonix_chat_alena.pid
+
+# рантайм Frigate, не версионировать
+backup_config.yaml
+.runtime_state.json.lock
+.runtime_state.json
