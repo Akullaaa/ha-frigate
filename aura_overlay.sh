@@ -48,7 +48,7 @@ case "$MODE" in
       tambur) export OV_W=960 OV_H=540 OV_SCALE=1.0 OV_SCOPE_X=center; PRE="scale=960:540,"; BV=2M; MAXR=4M; SCS=0.55; OUTFPS=25; AUDIO=0;;   # 19:20: 960x540 (было 1280x720, S 1.35) — снять нагрузку без потери ауры
       x2_wq_bl) export OV_W=960 OV_H=540 OV_SCALE=0.85 OV_SCOPE_X=center; PRE="scale=960:540,"; BV=2M; MAXR=4M; SCS=0.55; OUTFPS=25;;   # 19:20: 960x540 (было 1280x720, S 1.25); камера переведена на 15 к/с по DVRIP   # двор: HEVC 1080p@25 + PCMA, DVRIP есть; 1.25 — иначе Frigate внизу слева не влезает под DVRIP-строки
       axis_2100) export OV_W=960 OV_H=1280 OV_SCALE=1.6 OV_TWO_LISTS=1; PRE="scale=960:1280,"; BV=2M; MAXR=4M; SCS=0.3; OUTFPS=25; AUDIO=0;;   # axis: мост даёт H.264 480x640 (~7 к/с), апскейл ×2, два списка как у xm530, без звука
-      *)      export OV_W=960 OV_H=1080 OV_SCALE=1.6 OV_TWO_LISTS=1; PRE="scale=960:1080,"; BV=3M; MAXR=6M; SCS=0.3; OUTFPS=13;;
+      *)      export OV_W=960 OV_H=1080 OV_SCALE=1.6 OV_TWO_LISTS=1; PRE="scale=960:1080,"; BV=2M; MAXR=4M; SCS=0.3; OUTFPS=13;;   # 2M/4M с 20:10 (было 3M/6M — 30 ГБ/сутки записи)
     esac
     [ "$MODE" != base ] && OUTFPS=${MODE#b};;
   130)    export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=130; PRE="scale=960:1080,";;
@@ -58,6 +58,13 @@ case "$MODE" in
   *)      export OV_W=1920 OV_H=2160 OV_SCALE=1.8; OUTFPS=30; PRE="";;
 esac
 BV=${BV:-6M}; MAXR=${MAXR:-10M}   # битрейт кодера: у base ниже — он идёт в запись постоянно
+# 2026-09-15: частота базового потока берётся из HA (input_select.aura_fps_<камера> → /config/www/aura_fps.txt,
+# автоматизация «Ауры: частота кадров базового потока»): базовый поток всегда тёплый, поэтому переключение
+# частоты здесь работает мгновенно, в отличие от выбора отдельного потока b<N> в плеере Frigate.
+if [ "$MODE" = base ]; then
+  F=$(curl -s -m 3 "http://192.168.77.2:8123/local/aura_fps.txt" 2>/dev/null | sed -n "s/^${CAM}=//p" | head -1)
+  case "$F" in ''|*[!0-9]*) ;; *) [ "$F" -ge 5 ] && [ "$F" -le 130 ] && OUTFPS=$F;; esac
+fi
 export OV_FPS=$OUTFPS   # рендереру: кольцо из OUTFPS точек по орбите шарика (2026-09-15, по просьбе пользователя)
 export OV_DIR=/tmp/${CAM}_overlay_$MODE
 export OV_SCOPE_SCALE=$(awk -v s="$OV_SCALE" -v k="${SCS:-0.75}" 'BEGIN{printf "%.3f", s*k}')
@@ -69,7 +76,21 @@ mkdir -p /config/logs; LOG=/config/logs/${CAM}_overlay_$MODE.log   # 2026-09-15:
 F1=$(awk -v s="$OV_SCALE" 'BEGIN{printf "%d", 21*s}'); F2=$(awk -v s="$OV_SCALE" 'BEGIN{printf "%d", 12*s}'); F3=$(awk -v s="$OV_SCALE" 'BEGIN{printf "%d", 15*s}')
 mkdir -p "$OV_DIR"
 rm -f "$OV_DIR"/frame.txt "$OV_DIR"/yavg.txt "$OV_DIR"/scopes_geom.txt "$OV_DIR"/clock_pos.txt "$OV_DIR"/overlay.png
-python3 /config/aura_overlay_collect.py $$ 2>>"$LOG" &
+# 2026-09-15 (ночь): варианты b<N> стартуют «с тёплого» — забирают слой, геометрию и позицию часов у базового
+# режима (та же камера, тот же кадр и масштаб, отличается только кольцо) и читают его телеметрию по симлинку,
+# поэтому собственный сборщик им не нужен. Холодный старт 3–8 с → ~1 с: плеер Frigate не успевает уйти в
+# экономичный jsmpeg-режим, в котором он показывает БАЗОВЫЙ поток — со стороны это выглядело как
+# «переключение потока на частоту не работает».
+BASE_DIR=/tmp/${CAM}_overlay_base
+COLLECT=1
+if [ "$MODE" != base ] && [ -s "$BASE_DIR/overlay.png" ] && [ -s "$BASE_DIR/clock_pos.txt" ] && [ -s "$BASE_DIR/scopes_geom.txt" ]; then
+  cp -f "$BASE_DIR/overlay.png" "$BASE_DIR/clock_pos.txt" "$BASE_DIR/scopes_geom.txt" "$OV_DIR"/
+  ln -sfn "$BASE_DIR/telemetry.txt" "$OV_DIR/telemetry.txt"
+  COLLECT=0
+fi
+if [ "$COLLECT" = 1 ]; then
+  python3 /config/aura_overlay_collect.py $$ 2>>"$LOG" &
+fi
 ( while kill -0 $$ 2>/dev/null; do python3 /config/aura_overlay_render.py $$ --noclock 2>>"$LOG"; sleep 1; done ) &
 FIFO_P="$OV_DIR/progress.fifo"; FIFO_Y="$OV_DIR/yavg.fifo"; FIFO_A="$OV_DIR/audio.fifo"
 rm -f "$FIFO_P" "$FIFO_Y" "$FIFO_A" "$OV_DIR/audio.txt"; mkfifo "$FIFO_P" "$FIFO_Y" "$FIFO_A"
@@ -116,7 +137,7 @@ SC="[sc]scale=320:180,format=yuv420p,split=3[w][v][g];\
 AU="[0:a]astats=metadata=1:reset=25:measure_perchannel=none:measure_overall=RMS_level,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=$FIFO_A:direct=1,anullsink;"
 [ "$AUDIO" = 1 ] || AU=""   # у камеры без звука ветки нет
 exec "$FF" -nostdin -hide_banner -loglevel warning \
-  -rtsp_transport tcp -i "$SRC" \
+  -rtsp_transport tcp -probesize 500k -analyzeduration 1000000 -fflags nobuffer -flags low_delay -i "$SRC" \
   -re -thread_queue_size 64 -framerate 10 -loop 1 -f image2 -i "$OV_DIR/overlay.png" \
   -progress "$FIFO_P" -stats_period 1 \
   -filter_complex "[0:v]setpts=PTS-STARTPTS,${PRE}split=2[main][sc];\
