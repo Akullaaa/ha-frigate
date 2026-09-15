@@ -97,5 +97,5 @@ ${SC}\
 [o3][gr1]overlay=${GX}:${G1Y}[o4];[o4][gr2]overlay=${GX}:${G2Y}[o5];\
 [o5]fps=${OUTFPS},${CLOCK},${FX},format=nv12,hwupload[v]" \
   -vaapi_device /dev/dri/renderD128 \
-  -map "[v]" -c:v h264_vaapi -rc_mode VBR -b:v 6M -maxrate 10M -bufsize 10M -g $((OUTFPS * 2)) -an \
+  -map "[v]" -c:v h264_vaapi -rc_mode VBR -b:v 6M -maxrate 10M -bufsize 10M -g $((OUTFPS * 2)) -bf 0 -an \
   "${SINK[@]}" 2>>"$LOG"
