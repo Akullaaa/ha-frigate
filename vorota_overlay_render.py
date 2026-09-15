@@ -9,13 +9,14 @@
 Вход: DIR/telemetry.txt (пишет vorota_overlay_collect.py): "# Имя" — заголовок подгруппы (жёлтый, воздух
 сверху); "- текст" — вложенный пункт; "[left]"/"[center]"/"[right]" — переключение столбика; прочие
 маркеры [xx] игнорируются. Строка "Подпись: значение" рисуется двумя колонками.
+"[bottomleft]" — четвёртая плашка внизу слева (как на XPS), прижата к нижнему краю кадра.
 Выход: DIR/overlay.png (RGBA WxH, атомарно через tmp+rename), DIR/clock_pos.txt («x y размер» для часов,
 которые рисует ffmpeg фильтром drawtext поверх — как у iMac/XPS с флагом --noclock) и DIR/scopes_geom.txt
-(геометрия блока скопов «Сигнал» внизу по центру: плашку и подписи рисует этот рендерер, сами
+(геометрия блока скопов «Сигнал» внизу справа: плашку и подписи рисует этот рендерер, сами
 waveform/vectorscope/графики накладывает ffmpeg по этим координатам).
 Аргументы: PID процесса-родителя (ffmpeg потока: исчез — выходим), --once (один рендер), --noclock.
-Размер кадра и масштаб — переменные окружения OV_W, OV_H, OV_SCALE (по умолчанию 1920x2160, 1.5 —
-шрифты iMac 17/18 px × 1.5, т.к. кадр в полтора раза шире 1280).
+Размер кадра и масштаб — переменные окружения OV_W, OV_H, OV_SCALE, OV_SCOPE_SCALE (по умолчанию
+1920x2160 и 1.8: шрифты iMac 17/18 px × 1.8 = 30/32 px — по просьбе пользователя крупнее исходных 1.5).
 """
 import os
 import sys
@@ -27,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 DIR = os.environ.get("OV_DIR", "/tmp/vorota_overlay")
 W = int(os.environ.get("OV_W", "1920"))
 H = int(os.environ.get("OV_H", "2160"))
-S = float(os.environ.get("OV_SCALE", "1.5"))
+S = float(os.environ.get("OV_SCALE", "1.8"))
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
 pad = int(10 * S)          # отступ плашки от края кадра
@@ -59,7 +60,7 @@ head_h = line_h(head_font)
 
 
 def read_columns(clock_text):
-    cols = [[], [], []]
+    cols = [[], [], [], []]   # левый, средний, правый, нижний-левый ([bottomleft], как на XPS)
     cur = 0
     cols[0].append(("head", clock_text, 0))
     try:
@@ -76,6 +77,8 @@ def read_columns(clock_text):
             cur = 1; continue
         if l == "[right]":
             cur = 2; continue
+        if l == "[bottomleft]":
+            cur = 3; continue
         if l.startswith("[") and l.endswith("]"):
             continue
         if l.startswith("# "):
@@ -124,17 +127,19 @@ def layout(lines, rtl):
 clock_pos_written = ""
 
 
-def draw_col(d, L, box_x, clock_spacer=False, noclock=False):
+def draw_col(d, L, box_x, clock_spacer=False, noclock=False, box_y=None):
     global clock_pos_written
     if not L["items"]:
         return
-    d.rounded_rectangle([box_x, pad, box_x + L["box_w"], pad + L["box_h"]], radius=radius, fill=PLATE)
+    if box_y is None:
+        box_y = pad
+    d.rounded_rectangle([box_x, box_y, box_x + L["box_w"], box_y + L["box_h"]], radius=radius, fill=PLATE)
     edge = box_x + L["box_w"] - box_pad if L["rtl"] else box_x + box_pad
 
     def ax(rel, width):
         return edge - rel - width if L["rtl"] else edge + rel
 
-    y = pad + box_pad
+    y = box_y + box_pad
     for i, it in enumerate(L["items"]):
         if it["head"]:
             if i > 0:
@@ -160,18 +165,21 @@ def draw_col(d, L, box_x, clock_spacer=False, noclock=False):
                 tw = text_w(it["text"], body_font)
                 d.text((ax(it["off"], tw), y), it["text"], font=body_font, fill=BODY, stroke_width=stroke, stroke_fill="black")
             y += body_h
-        if y > H - pad:
+        if y > box_y + L["box_h"] - box_pad:
             break
 
 
-# Блок скопов «Сигнал» внизу по центру (как на XPS): плашка + подписи здесь, содержимое — ffmpeg.
-SC_W, SC_H = int(720 * S), int(150 * S)
-SC_X, SC_Y = (W - SC_W) // 2, H - pad - SC_H
-_in = int(8 * S)
+# Блок скопов «Сигнал» внизу справа (2026-09-15: был по центру; с четвёртой плашкой внизу слева и крупным
+# шрифтом уместился только справа, со своим масштабом OV_SCOPE_SCALE — по умолчанию 0.75 от S).
+# Плашка + подписи здесь, содержимое (waveform/vectorscope/графики) — ffmpeg по scopes_geom.txt.
+SS = float(os.environ.get("OV_SCOPE_SCALE", str(S * 0.75)))
+SC_W, SC_H = int(720 * SS), int(150 * SS)
+SC_X, SC_Y = W - pad - SC_W, H - pad - SC_H
+_in = int(8 * SS)
 _lab = body_h
-WF_W, WF_H = int(320 * S), int(96 * S)
-VS_S = int(96 * S)
-G_W, G_H = int(248 * S), int(40 * S)
+WF_W, WF_H = int(320 * SS), int(96 * SS)
+VS_S = int(96 * SS)
+G_W, G_H = int(248 * SS), int(40 * SS)
 WF_X, WF_Y = SC_X + _in, SC_Y + _in + head_h + _lab
 VS_X, VS_Y = WF_X + WF_W + _in, WF_Y
 G_X = VS_X + VS_S + _in
@@ -202,12 +210,15 @@ def render(noclock):
     cols = read_columns(clock)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    Ls = [layout(cols[0], False), layout(cols[1], False), layout(cols[2], True)]
-    used = sum(L["box_w"] for L in Ls)
+    Ls = [layout(cols[0], False), layout(cols[1], False), layout(cols[2], True), layout(cols[3], False)]
+    used = sum(L["box_w"] for L in Ls[:3])
     gap = max(4, (W - 2 * pad - used) / 2)
     draw_col(d, Ls[0], pad, clock_spacer=True, noclock=noclock)
     draw_col(d, Ls[1], int(pad + Ls[0]["box_w"] + gap))
     draw_col(d, Ls[2], W - pad - Ls[2]["box_w"])
+    # нижняя-левая плашка прижата к нижнему краю; выше неё не залезает на верхнюю левую (высоты считает layout)
+    bl_y = max(pad + Ls[0]["box_h"] + group_gap, H - pad - Ls[3]["box_h"])
+    draw_col(d, Ls[3], pad, box_y=bl_y)
     draw_scopes(d)
     tmp, dst = f"{DIR}/overlay.png.tmp", f"{DIR}/overlay.png"
     img.save(tmp, "PNG", compress_level=1)

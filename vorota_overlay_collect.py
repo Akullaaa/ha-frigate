@@ -137,13 +137,13 @@ def camera_param_lines(d):
         dn = hexint(p.get("DayNightColor", 0))
         L.append("День/ночь: " + {0: "авто", 1: "цвет", 2: "ч/б", 3: "авто"}.get(dn, f"режим {dn}"))
         L.append("- ИК-фильтр: " + ("авто" if p.get("IRCUTMode") == 0 else f"режим {p.get('IRCUTMode')}"))
-        L.append(f"- Порог переключения: {p.get('DncThr', '?')}")
+        L.append(f"- Порог день/ночь: {p.get('DncThr', '?')}")
         L.append(f"Шумодав день: {p.get('Day_nfLevel', '?')} из 5")
         L.append(f"- Ночь: {p.get('Night_nfLevel', '?')} из 5")
-        L.append("Компенсация засветки: " + ("выкл" if hexint(p.get("BLCMode", 0)) == 0 else "вкл"))
+        L.append("Засветка (BLC): " + ("выкл" if hexint(p.get("BLCMode", 0)) == 0 else "вкл"))
         L.append("- Антипересвет: " + ("вкл" if px.get("PreventOverExpo") else "выкл"))
         L.append("- Антитуман: " + (f"вкл, {fog.get('level', '?')}" if fog.get("enable") else "выкл"))
-        L.append("- Коррекция дисторсии: " + ("вкл" if px.get("Ldc") else "выкл"))
+        L.append("- Дисторсия: " + ("вкл" if px.get("Ldc") else "выкл"))
         L.append("Отражение: " + ("нет" if hexint(p.get("PictureFlip", 0)) == 0 and hexint(p.get("PictureMirror", 0)) == 0 else "да"))
     if isinstance(vc, list) and vc:
         c = vc[0].get("VideoColorParam", {}) if isinstance(vc[0], dict) else {}
@@ -173,7 +173,7 @@ def frigate_lines(stats, ptz):
         L.append("Связь: " + {"excellent": "отличная", "good": "хорошая", "fair": "средняя", "poor": "плохая"}.get(c.get("connection_quality"), str(c.get("connection_quality", "?"))))
         L.append(f"- Обрывов за час: {c.get('reconnects_last_hour', '?')}")
         L.append(f"- Задержек за час: {c.get('stalls_last_hour', '?')}")
-        L.append(f"CPU ffmpeg записи: {c.get('ffmpeg_cpu', '?')} %")
+        L.append(f"CPU записи: {c.get('ffmpeg_cpu', '?')} %")
         L.append(f"- Захват: {c.get('capture_cpu', '?')} %")
         L.append(f"- Детект: {c.get('detect_cpu', '?')} %")
     det = (stats or {}).get("detectors", {})
@@ -182,7 +182,7 @@ def frigate_lines(stats, ptz):
         break
     st = (stats or {}).get("service", {}).get("storage", {}).get("/media/frigate/recordings", {})
     if st:
-        L.append(f"Диск записей свободно: {st.get('free', 0) / 1024:.1f} ГБ")
+        L.append(f"Диск свободно: {st.get('free', 0) / 1024:.1f} ГБ")
     if ptz:
         L.append("# PTZ")
         feats = ptz.get("features", [])
@@ -262,17 +262,17 @@ def main():
         if bitrate:
             L.append(f"Битрейт факт.: {bitrate}")
         if fps:
-            L.append(f"Кадров/с в оверлее: {fps}")
+            L.append(f"К/с в оверлее: {fps}")
         if light:
-            L.append(f"Освещённость кадра: {light}")
+            L.append(f"Освещённость: {light}")
         L += camera_param_lines(d)
         L.append("[center]")
         L.append("# Сеть")
         L.append(f"Адрес LAN: {CAM_IP}")
         L.append("- Линк: Wi-Fi, сеть 77")
         L.append("- MAC: 60:de:f4:1b:7b:2e")
-        L.append(f"Отклик камеры (TCP): {ping}")
-        L.append("Путь: камера → go2rtc → ffmpeg")
+        L.append(f"Отклик (TCP): {ping}")
+        L.append("Путь: камера→go2rtc→ffmpeg")
         L.append("- Декод: программный (HEVC)")
         L.append("- Кодер оверлея: h264_vaapi")
         si = d.sysinfo or {}
@@ -284,20 +284,30 @@ def main():
             L.append(f"Прошивка: {'.'.join(sw.split('.')[:3])}")
             L.append(f"- Сборка: {si.get('BuildTime', '?')[:10]}")
             L.append(f"Серийный: {si.get('SerialNo', '?')}")
-            L.append(f"Аудио: вход {si.get('AudioInChannel', 0)}, разговор {si.get('TalkOutChannel', 0)}")
-        L += frigate_lines(stats, ptz)
+            L.append(f"Аудио: вход {si.get('AudioInChannel', 0)}, разг. {si.get('TalkOutChannel', 0)}")
         L.append("[right]")
         if extra:
             L += [ln for ln in extra.split("\n") if ln and not ln.startswith("[")]
+        # четвёртая плашка внизу слева (как GPU-блок на XPS): Frigate и PTZ — иначе при крупном шрифте
+        # три верхних столбика не помещаются в 1920 px по ширине
+        L.append("[bottomleft]")
+        L += frigate_lines(stats, ptz)
         tmp = f"{DIR}/telemetry.txt.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(L) + "\n")
         os.replace(tmp, f"{DIR}/telemetry.txt")
         if os.environ.get("ONCE") == "1":
-            return
+            break
         if parent and not os.path.exists(f"/proc/{parent}"):
-            return
+            break
         time.sleep(2)
+    # закрыть DVRIP-сессию: XM держит незакрытые сессии и на быстрый повторный старт потока
+    # (frame.jpeg стартует и гасит exec за секунды) отвечает отказом в логине
+    try:
+        if d.s is not None and getattr(d.s, "sock", None):
+            d.s.sock.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
