@@ -32,6 +32,7 @@ MODE="${2:-full}"
 case "$MODE" in
   130)    export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=130; PRE="scale=960:1080,";;
   60)     export OV_W=1280 OV_H=1440 OV_SCALE=1.2; OUTFPS=60; PRE="scale=1280:1440,";;
+  44)     export OV_W=1440 OV_H=1620 OV_SCALE=1.35; OUTFPS=44; PRE="scale=1440:1620,";;
   77)     export OV_W=1152 OV_H=1296 OV_SCALE=1.08; OUTFPS=77; PRE="scale=1152:1296,";;
   *)      export OV_W=1920 OV_H=2160 OV_SCALE=1.8; OUTFPS=30; PRE="";;
 esac
@@ -70,7 +71,7 @@ CLOCK="$DT:fontsize=$CFS:x=$CX:y=$CY:text='%{localtime\:%F  %T.%4N}'"
 # просьбе пользователя): TAILN точек вдоль дуги до ПРЕДЫДУЩЕГО положения (n-1), убывающие по размеру и
 # прозрачности. █ по нижнему краю (проход 2 с), номер кадра — слева от скопов.
 R="(w/2-$F1)"
-TAILN=6; TAIL=""
+TAILN=${OV_TAIL:-6}; TAIL=""   # OV_TAIL=0 — без хвоста (для замеров)
 for j in $(seq 1 $TAILN); do
   fs=$(awk -v f="$F1" -v j="$j" -v n="$TAILN" 'BEGIN{printf "%d", f*(1-0.7*j/n)}')
   al=$(awk -v j="$j" -v n="$TAILN" 'BEGIN{printf "%.2f", 0.75*(1-j/(n+1))}')
