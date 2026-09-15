@@ -7,7 +7,7 @@
 # с полным контролем. Источник — "сырой" поток (H265, тот же, что видят
 # detect/record), не отдельное подключение к камере. Софтверный decode+encode
 # (не VAAPI) — по образцу оригинального vbr_overlay.sh, без лишних экспериментов
-# с hwaccel decode (см. историю с spalnia/vbr_overlay_vaapi.sh, decode на VAAPI
+# с hwaccel decode (см. историю с tuya_sp/vbr_overlay_vaapi.sh, decode на VAAPI
 # там не задался).
 set -e
 FF=/usr/lib/ffmpeg/7.0/bin/ffmpeg
