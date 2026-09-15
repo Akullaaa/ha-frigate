@@ -20,10 +20,23 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xm_dvrip  # noqa: E402
 
-DIR = os.environ.get("OV_DIR", "/tmp/xm530_overlay")
-CAM_IP = xm_dvrip.HOST
+# 2026-09-15: сборщик общий для камер (термин пользователя — «аура»); имя камеры go2rtc — OV_CAM от aura_overlay.sh.
+# DVRIP/PTZ есть только у xm530; у tambur (LookCam, Wi-Fi сеть 77) — только сеть, железо, Frigate и HA.
+CAM = os.environ.get("OV_CAM", "xm530")
+CAM_INFO = {
+    "xm530": {"ip": xm_dvrip.HOST, "model": "IPG-X4C-WER", "link": "Wi-Fi, сеть 77", "dvrip": (xm_dvrip.HOST, xm_dvrip.USERNAME, xm_dvrip.PASSWORD)},
+    "tambur": {"ip": "192.168.77.9", "model": "LookCam, HEVC 1080p", "link": "Wi-Fi, сеть 77"},
+    # двор (бывш. dvor, 2026-09-15): чип XM530V200, DVRIP-учётка из device_credentials/x2_wq_bl.txt (бывш. dvor.txt)
+    "x2_wq_bl": {"ip": "10.0.0.7", "model": "X2-WQ-BL (XM530)", "link": "Ethernet, сеть Bezeq", "dvrip": ("10.0.0.7", "алёна", "LULX93o72Wml")},
+    "axis_2100": {"ip": "192.168.77.16", "model": "AXIS 2100, MJPEG через мост", "link": "Ethernet"},
+}
+DIR = os.environ.get("OV_DIR", f"/tmp/{CAM}_overlay")
+# 2026-09-15: у камер 16:9 (три колонки в 720 px, ~20 строк на столбик) полный набор DVRIP-строк не влезает —
+# в компактном режиме (не два списка) «Поток» и «Камера (DVRIP)» ужаты до главного
+COMPACT = os.environ.get("OV_TWO_LISTS") != "1"
+CAM_IP = CAM_INFO.get(CAM, CAM_INFO["xm530"])["ip"]
 FRIGATE = "http://127.0.0.1:5000/api"
-GO2RTC = "http://127.0.0.1:1984/api/streams?src=xm530_cam"   # чистый поток камеры (с 2026-09-15 xm530 — с оверлеем)
+GO2RTC = f"http://127.0.0.1:1984/api/streams?src={CAM}_cam"   # чистый поток камеры (с 2026-09-15 xm530 — с оверлеем)
 GO2RTC_AUTH = os.environ.get("GO2RTC_AUTH", "")   # "user:pass", передаёт xm530_overlay.sh
 HA_EXTRA = "http://192.168.77.2:8123/local/xps_overlay_extra.txt"
 
@@ -77,12 +90,13 @@ class Dvrip:
                 raise RuntimeError("DVRIP login: пауза после отказа")
             # файл-стоп: пока он есть, к DVRIP не ходим вообще (2026-09-15: чтобы дать блокировке admin
             # истечь без единой попытки; /config здесь — каталог конфига аддона Frigate)
-            if os.path.exists("/config/xm530_dvrip_pause"):
+            if os.path.exists(f"/config/{CAM}_dvrip_pause"):
                 self.fail_at = time.monotonic()
                 raise RuntimeError("DVRIP login: пауза после отказа")
             try:
-                s = xm_dvrip.DvripSession()
-                r = s.login()
+                host, user, pw = CAM_INFO[CAM]["dvrip"]
+                s = xm_dvrip.DvripSession(host=host)
+                r = s.login(user, pw)
             except Exception:
                 self.fail_at = time.monotonic()
                 self.backoff = min(self.backoff * 2, 600)
@@ -115,6 +129,8 @@ class Dvrip:
         return r.get("SystemInfo") or {}
 
     def refresh_slow(self):
+        if "dvrip" not in CAM_INFO.get(CAM, {}):   # DVRIP только у камер Xiongmai (xm530, x2_wq_bl)
+            return
         for key in ["Simplify.Encode", "Camera.Param", "Camera.ParamEx", "AVEnc.VideoColor", "Camera.ClearFog", "Camera.WhiteLight"]:
             try:
                 self.slow[key] = self.get(key)
@@ -197,7 +213,8 @@ class HwStats:
             gmhz = f", {self._read('/sys/class/drm/card0/gt_act_freq_mhz')} МГц"
         except OSError:
             pass
-        L.append("GPU: " + (f"{self.gpu:.1f} %" if self.gpu is not None else "…") + gmhz)   # i915/VAAPI, занятость по rc6
+        # 2026-09-15: строка GPU убрана — параметры iGPU Оптиплекса приходят из HA подгруппой «GPU Оптиплекс» во все
+        # ауры (sensor.gpu_optiplex_*: 3D/Video, такт, RC6, мощность, память), чтобы цифры везде были одни и те же
         try:
             mi = {}
             for l in open("/proc/meminfo"):
@@ -213,10 +230,13 @@ def camera_lines(d):
     L = []
     enc = (d.slow.get("Simplify.Encode") or {}).get("MainFormat", {}).get("Video", {})
     L.append("# Поток")
-    L.append("Камера: IPG-X4C-WER")   # чип XM530
+    L.append(f"Камера: {CAM_INFO.get(CAM, CAM_INFO['xm530'])['model']}")   # xm530 — чип XM530
     # 2026-09-15: строки «Объективы: 2 (широкий + зум)» и «Разрешение: 1920x2160 пикс.» убраны ради шрифта 1.3 —
     # статичные, оба списка в base заполняют высоту впритык
-    if enc:
+    if enc and COMPACT:   # 16:9 (три колонки, ~20 строк): только кодек и потолок
+        L.append(f"Кодек: {enc.get('Compression', '?')}, {enc.get('FPS', '?')} к/с")
+        L.append(f"Потолок: {hexint(enc.get('BitRate', 0)) / 1024:.1f} Мбит/с, Q{enc.get('Quality', '?')}")
+    elif enc:
         L.append(f"- Частота: {enc.get('FPS', '?')} к/с")
         L.append(f"Кодек: {enc.get('Compression', '?')}")
         L.append(f"- Кодер: камера, {enc.get('BitRateControl', '?')}")
@@ -268,12 +288,15 @@ def camera_param_lines(d):
         if wp.get("Enable"):
             L.append(f"- Период: {wp.get('SHour', 0):02d}:{wp.get('SMinute', 0):02d}–{wp.get('EHour', 0):02d}:{wp.get('EMinute', 0):02d}")
         L.append(f"- Яркость: {wl.get('Brightness', '?')} %")
+    if COMPACT:   # 16:9: только главное — экспозиция, усиление, день/ночь, прожектор
+        keep = ("# ", "Экспозиция", "- Выдержка", "Усиление", "День/ночь", "- ИК-фильтр", "Прожектор")
+        L = [l for l in L if l.startswith(keep)]
     return L
 
 
 def frigate_lines(stats, ptz):
     L = ["# Frigate"]
-    c = (stats or {}).get("cameras", {}).get("xm530", {})
+    c = (stats or {}).get("cameras", {}).get(CAM, {})
     if c:
         L.append(f"Захват: {c.get('camera_fps', '?')} к/с")
         L.append(f"- Детекция: {c.get('detection_fps', '?')} к/с")
@@ -320,7 +343,7 @@ def main():
             d.refresh_slow()
         if n % 30 == 0:
             try:
-                ptz = json.loads(http(f"{FRIGATE}/xm530/ptz/info"))
+                ptz = json.loads(http(f"{FRIGATE}/{CAM}/ptz/info")) if CAM == "xm530" else None
             except Exception:
                 ptz = None
         n += 1
@@ -385,7 +408,7 @@ def main():
         L.append("[center]")
         L.append("# Сеть")
         L.append(f"IP: {CAM_IP}")
-        L.append("- Линк: Wi-Fi, сеть 77")
+        L.append(f"- Линк: {CAM_INFO.get(CAM, CAM_INFO['xm530'])['link']}")
         # «MAC: 60:de:f4:1b:7b:2e» убран 2026-09-15 ради шрифта 1.3 (есть в device_credentials/xm530.txt)
         L.append(f"Отклик: {ping}")
         # «Путь: камера→go2rtc→ffmpeg», «Декод: программный (HEVC)», «Кодер оверлея: h264_vaapi» убраны 2026-09-15

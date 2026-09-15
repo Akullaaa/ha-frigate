@@ -2,8 +2,8 @@
 # Копия /config/.local/bin/xm530_dvrip.py для контейнера Frigate (ему не виден /config HA): DVRIP-клиент XM530 для
 # сборщика оверлея xm530_overlay_collect.py. Правки — синхронно с оригиналом.
 """Клиент бинарного SDK-протокола DVRIP/NetSurveillance ("Sofia") камеры xm530
-(192.168.77.30:34567, до 2026-09-15 — 10.0.0.12) — по образцу /config/.local/bin/dvor_dvrip.py (та же платформа
-камеры, тот же протокол). В отличие от dvor, отдельную DVRIP-учётку здесь не
+(192.168.77.30:34567, до 2026-09-15 — 10.0.0.12) — по образцу /config/.local/bin/x2_wq_bl_dvrip.py (та же платформа
+камеры, тот же протокол). В отличие от x2_wq_bl, отдельную DVRIP-учётку здесь не
 заводили — подошли штатные ONVIF-креды (ahuser/bbbbbbb7), они же общие для
 нескольких камер в этом конфиге.
 
@@ -18,7 +18,7 @@
 как есть, реальный переворот сделан софтверно (-vf vflip в config.yaml Frigate).
 
 Write-операции пользователей (Add/ModifyUser и т.д., msgId 1476+) НЕ проверялись
-и не нужны — в отличие от dvor, здесь такой задачи не было.
+и не нужны — в отличие от x2_wq_bl, здесь такой задачи не было.
 """
 import hashlib
 import json
@@ -55,7 +55,7 @@ class DvripSession:
 
     def _pack(self, msg_id: int, obj: dict) -> bytes:
         # ensure_ascii=False обязателен — прошивка тихо стирает поле в пустую строку
-        # при стандартном \uXXXX-экранировании кириллицы (та же грабля, что и с OSD dvor).
+        # при стандартном \uXXXX-экранировании кириллицы (та же грабля, что и с OSD x2_wq_bl).
         body = (json.dumps(obj, ensure_ascii=False) + "\x0a").encode("utf-8")
         header = struct.pack(
             "<BBHIIBBHI",

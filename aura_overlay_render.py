@@ -180,7 +180,7 @@ SS = float(os.environ.get("OV_SCOPE_SCALE", str(S * 0.75)))
 SC_W, SC_H = int(720 * SS), int(150 * SS)
 SC_Y = H - pad - SC_H
 # в раскладке «два списка» скопы внизу по центру (между OSD камеры слева и правым списком), иначе — справа
-SC_X = int(0.27 * W) if os.environ.get("OV_TWO_LISTS") == "1" else W - pad - SC_W
+SC_X = int(0.27 * W) if os.environ.get("OV_TWO_LISTS") == "1" else (int((W - SC_W) / 2) if os.environ.get("OV_SCOPE_X") == "center" else W - pad - SC_W)   # OV_SCOPE_X=center — tambur (три колонки, 16:9)
 _in = int(8 * SS)
 # 2026-09-15: шрифты блока скопов — от масштаба скопов SS, а не от S: в режиме base (S=1.2, SS=0.66) подписи
 # основным шрифтом вылезали за узкую плашку.
@@ -340,7 +340,7 @@ def main():
             break
         if watch and not os.path.exists(f"/proc/{watch}"):
             break
-        time.sleep(0.5)
+        time.sleep(2.0)   # 2026-09-15: было 0.5 → 1.0 → 2.0 — сборщик пишет телеметрию раз в 2 с, чаще рисовать нечего
 
 
 if __name__ == "__main__":

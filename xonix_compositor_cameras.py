@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ксоникс-слой "все камеры": вложенные окна, но каждое — своя ЖИВАЯ камера,
 а не увеличенная копия родителя (как в xonix_compositor_nested.py). Фон
-(весь холст 960x540) — dvor. Внутри него, друг в друге, отскакивают два
+(весь холст 960x540) — x2_wq_bl. Внутри него, друг в друге, отскакивают два
 окна поменьше — xm530, tambur. Итог — один поток, показывающий текущее
 состояние сразу по нескольким стабильным камерам.
 
@@ -36,7 +36,7 @@ multipart-заголовки вообще) и отдаются в stdout уже 
 (rtsp://127.0.0.1:8554/...), те же самые, к которым уже подключён Frigate
 для detect/record, а не отдельные sub-потоки или второе прямое
 подключение к камере. Из-за этого xm530/tambur декодируются здесь В
-ПОЛНОМ разрешении (а не через _sub, как dvor, — dvor_sub существовал уже
+ПОЛНОМ разрешении (а не через _sub, как x2_wq_bl, — x2_wq_bl_sub существовал уже
 давно, отдельным подключением, до этого скрипта, трогать не стали) —
 аппаратного HEVC-декодирования на этом железе нет (Haswell/i965, только
 программное), так что это реальная нагрузка на CPU, принято осознанно.
@@ -48,7 +48,7 @@ multipart-заголовки вообще) и отдаются в stdout уже 
 xonix_layer_multicam.sh, как и раньше.
 
 Каждая камера читается в отдельном потоке, хранится только САМЫЙ СВЕЖИЙ
-кадр (с блокировкой) — если конкретная камера подвисла (у dvor и xm530
+кадр (с блокировкой) — если конкретная камера подвисла (у x2_wq_bl и xm530
 уже наблюдался дрейф MAC/IP с простоями), холст просто продолжает
 показывать её последний кадр, не блокируя остальные и не падая целиком.
 """
@@ -67,11 +67,11 @@ CANVAS_W, CANVAS_H = 960, 540
 FPS = 12
 
 # (имя, размер_окна, команда декодирования -> raw bgr24 нужного размера на stdout)
-# dvor — фон, размер = весь холст; остальные — вложенные окна, от большего к меньшему.
+# x2_wq_bl — фон, размер = весь холст; остальные — вложенные окна, от большего к меньшему.
 CAMERAS = [
-    ("dvor", (CANVAS_W, CANVAS_H), [
+    ("x2_wq_bl", (CANVAS_W, CANVAS_H), [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
-        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/dvor_sub",
+        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/x2_wq_bl_sub",
         "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
     ]),
@@ -83,7 +83,7 @@ CAMERAS = [
     ]),
     ("tambur", (400, 225), [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
-        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/tambur",
+        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/tambur_cam",   # 2026-09-15: чистый поток
         "-vf", "format=nv12,hwupload,scale_vaapi=400:225,hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
     ]),
@@ -95,7 +95,7 @@ CAMERAS = [
     ]),
 ]
 
-# вложенные окна (без фона-dvor) — те же 2, в том же порядке, что CAMERAS[1:]
+# вложенные окна (без фона-x2_wq_bl) — те же 2, в том же порядке, что CAMERAS[1:]
 SIZES = [size for _, size, _ in CAMERAS[1:]]
 
 latest_frames: dict[str, np.ndarray] = {}
@@ -180,7 +180,7 @@ def reader(name: str, size: tuple[int, int], cmd: list[str]) -> None:
         finally:
             proc.kill()
             proc.wait()
-        # камера отвалилась (например, тот самый дрейф MAC/IP у dvor/xm530) —
+        # камера отвалилась (например, тот самый дрейф MAC/IP у x2_wq_bl/xm530) —
         # держим последний кадр, ждём и перезапускаем decode-процесс
         time.sleep(2)
 
@@ -201,7 +201,7 @@ def main() -> None:
         t0 = time.monotonic()
 
         with lock:
-            bg = latest_frames["dvor"].copy()
+            bg = latest_frames["x2_wq_bl"].copy()
             windows = [latest_frames[name] for name, _, _ in CAMERAS[1:]]
 
         step(levels)
