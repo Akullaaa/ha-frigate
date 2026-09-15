@@ -23,7 +23,7 @@ import xm_dvrip  # noqa: E402
 DIR = os.environ.get("OV_DIR", "/tmp/vorota_overlay")
 CAM_IP = xm_dvrip.HOST
 FRIGATE = "http://127.0.0.1:5000/api"
-GO2RTC = "http://127.0.0.1:1984/api/streams?src=vorota"
+GO2RTC = "http://127.0.0.1:1984/api/streams?src=vorota_cam"   # чистый поток камеры (с 2026-09-15 vorota — с оверлеем)
 GO2RTC_AUTH = os.environ.get("GO2RTC_AUTH", "")   # "user:pass", передаёт vorota_overlay.sh
 HA_EXTRA = "http://192.168.77.2:8123/local/xps_overlay_extra.txt"
 
@@ -64,13 +64,29 @@ class Dvrip:
         self.s = None
         self.sysinfo = None
         self.slow = {}
+        self.fail_at = -1e9   # monotonic-время последнего неудачного логина
 
     def _ensure(self):
         if self.s is None:
-            self.s = xm_dvrip.DvripSession()
-            if self.s.login().get("Ret") != 100:
-                self.s = None
-                raise RuntimeError("DVRIP login")
+            # 2026-09-15: учётка admin была найдена заблокированной (Ret 205 «пользователь заблокирован»).
+            # Раньше при любом отказе refresh_slow делал до 6 новых логинов за цикл каждые 2 с — сам
+            # подкармливал блокировку. Теперь после отказа — пауза 60 с, потом одна попытка.
+            if time.monotonic() - self.fail_at < 60:
+                raise RuntimeError("DVRIP login: пауза после отказа")
+            try:
+                s = xm_dvrip.DvripSession()
+                r = s.login()
+            except Exception:
+                self.fail_at = time.monotonic()
+                raise
+            if r.get("Ret") != 100:
+                try:
+                    s.sock.close()
+                except Exception:
+                    pass
+                self.fail_at = time.monotonic()
+                raise RuntimeError(f"DVRIP login Ret {r.get('Ret')}")
+            self.s = s
 
     def get(self, name):
         self._ensure()

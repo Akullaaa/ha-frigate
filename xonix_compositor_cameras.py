@@ -77,7 +77,7 @@ CAMERAS = [
     ]),
     ("vorota", (640, 360), [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
-        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/vorota",
+        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/vorota_cam",   # 2026-09-15: чистый поток (vorota теперь с оверлеем)
         "-vf", "format=nv12,hwupload,scale_vaapi=640:360,hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
     ]),

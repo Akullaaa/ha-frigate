@@ -22,24 +22,29 @@
 # минута истории у drawgraph получается шириной 1200 px со scale до размера плашки. Юникод в drawtext
 # (●, █, «кадр») требует LC_ALL=C.UTF-8 — без него в exec-окружении go2rtc/docker текст превращается в «???».
 # Файлы clock_pos/scopes_geom — с переводом строки, иначе read под set -e возвращает ошибку на EOF.
-# Запускается go2rtc только пока кто-то смотрит этот поток (exec-источники по требованию); запись камеры
-# идёт отдельно и без оверлея.
+# Режимы 60/44/77/full/130 go2rtc запускает только пока кто-то смотрит (exec-источники по требованию).
+# 2026-09-15 (вечер), по решению пользователя: режим base — 960x1080 @ нативные 20 к/с, 3 Мбит/с — это САМ
+# базовый поток go2rtc «vorota», из которого Frigate берёт detect и record (-c:v copy), так что оверлей есть
+# в записях и в экономичном jsmpeg-режиме плеера всегда; работает постоянно, пока жив Frigate. Чистый поток
+# камеры переименован в «vorota_cam» — вход для всех режимов здесь и для остальных vorota_*-скриптов.
 set -e
 export LC_ALL=C.UTF-8
 FF=/usr/lib/ffmpeg/7.0/bin/ffmpeg
 OUT="$1"
 MODE="${2:-full}"
 case "$MODE" in
+  base)   export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=20; PRE="scale=960:1080,"; BV=3M; MAXR=6M;;
   130)    export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=130; PRE="scale=960:1080,";;
   60)     export OV_W=1280 OV_H=1440 OV_SCALE=1.2; OUTFPS=60; PRE="scale=1280:1440,";;
   44)     export OV_W=1440 OV_H=1620 OV_SCALE=1.35; OUTFPS=44; PRE="scale=1440:1620,";;
   77)     export OV_W=1152 OV_H=1296 OV_SCALE=1.08; OUTFPS=77; PRE="scale=1152:1296,";;
   *)      export OV_W=1920 OV_H=2160 OV_SCALE=1.8; OUTFPS=30; PRE="";;
 esac
+BV=${BV:-6M}; MAXR=${MAXR:-10M}   # битрейт кодера: у base ниже — он идёт в запись постоянно
 export OV_DIR=/tmp/vorota_overlay_$MODE
 export OV_SCOPE_SCALE=$(awk -v s="$OV_SCALE" 'BEGIN{printf "%.3f", s*0.75}')
 export GO2RTC_AUTH="alena:Rm9g8fsLobAS6I2jfoEY"
-SRC="rtsp://alena:Rm9g8fsLobAS6I2jfoEY@127.0.0.1:8554/vorota"
+SRC="rtsp://alena:Rm9g8fsLobAS6I2jfoEY@127.0.0.1:8554/vorota_cam"   # чистый поток камеры (до 2026-09-15 — vorota)
 FONT=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf
 LOG=/tmp/vorota_overlay_$MODE.log
 # размеры индикаторов drawtext — от масштаба шрифта (в единицах iMac: 21/12/15 px при S=1)
@@ -97,5 +102,5 @@ ${SC}\
 [o3][gr1]overlay=${GX}:${G1Y}[o4];[o4][gr2]overlay=${GX}:${G2Y}[o5];\
 [o5]fps=${OUTFPS},${CLOCK},${FX},format=nv12,hwupload[v]" \
   -vaapi_device /dev/dri/renderD128 \
-  -map "[v]" -c:v h264_vaapi -rc_mode VBR -b:v 6M -maxrate 10M -bufsize 10M -g $((OUTFPS * 2)) -bf 0 -an \
+  -map "[v]" -c:v h264_vaapi -rc_mode VBR -b:v $BV -maxrate $MAXR -bufsize $MAXR -g $((OUTFPS * 2)) -bf 0 -an \
   "${SINK[@]}" 2>>"$LOG"
