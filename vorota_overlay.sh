@@ -6,7 +6,10 @@
 #   → [режим 130: scale до 960x1080] → overlay PNG-слоя (vorota_overlay_render.py, данные —
 #   vorota_overlay_collect.py) → скопы (ffmpeg сам, по геометрии из scopes_geom.txt рендерера)
 #   → fps=N → drawtext (часы, ● по кругу, █ по низу, номер кадра) → hwupload → h264_vaapi → RTSP {output}.
-# Режимы (второй аргумент): full — 1920x2160 @ 30 к/с (по умолчанию); 130 — 960x1080 @ 130 к/с как у iMac.
+# Режимы (второй аргумент): 60 — 1280x1440 @ 60 к/с (основной live «Vorota» по просьбе пользователя);
+# full — 1920x2160 @ 30 к/с; 130 — 960x1080 @ 130 к/с как у iMac. Замер на реальном потоке (6 с вывода):
+# 1920x2160@60 — 13,9 с (≈0,55x, не тянет), 1440x1620@60 — 10,2–10,8 с (отстаёт), 1280x1440@60 — 9,2–9,7 с
+# (реальное время, как full@30 и 960x1080@130).
 # Замер 2026-09-15 (testsrc2, h264_vaapi Haswell): 1920x2160 fps=130 — 0,48x даже без текста, fps=60 — 1,08x,
 # fps=30 + 3 drawtext — 1,85x; 960x1080 fps=130 + 3 drawtext — 1,52x; 1280x1440@130 — 0,93x. Упор — кодер
 # VAAPI + hwupload, не drawtext. Поэтому 130 к/с только на половинном кадре.
@@ -26,8 +29,9 @@ FF=/usr/lib/ffmpeg/7.0/bin/ffmpeg
 OUT="$1"
 MODE="${2:-full}"
 case "$MODE" in
-  130)  export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=130; PRE="scale=960:1080,";;
-  *)    export OV_W=1920 OV_H=2160 OV_SCALE=1.8; OUTFPS=30; PRE="";;
+  130)    export OV_W=960 OV_H=1080 OV_SCALE=0.9; OUTFPS=130; PRE="scale=960:1080,";;
+  60)     export OV_W=1280 OV_H=1440 OV_SCALE=1.2; OUTFPS=60; PRE="scale=1280:1440,";;
+  *)      export OV_W=1920 OV_H=2160 OV_SCALE=1.8; OUTFPS=30; PRE="";;
 esac
 export OV_DIR=/tmp/vorota_overlay_$MODE
 export OV_SCOPE_SCALE=$(awk -v s="$OV_SCALE" 'BEGIN{printf "%.3f", s*0.75}')
