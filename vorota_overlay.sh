@@ -65,8 +65,18 @@ esac
 echo "=== старт $(date '+%F %T') режим $MODE → $OUT" >> "$LOG"
 DT="drawtext=fontfile=$FONT:fontcolor=0xFFD65A:shadowcolor=black@0.8:shadowx=1:shadowy=1"
 CLOCK="$DT:fontsize=$CFS:x=$CX:y=$CY:text='%{localtime\:%F  %T.%4N}'"
-# ● по кругу, вписанному в ширину кадра (оборот/с), █ по нижнему краю (проход 2 с), номер кадра (слева от скопов)
-FX="$DT:fontsize=$F1:x='w/2+(w/2-$F1)*cos(2*PI*t)-$F1/3':y='h/2+(w/2-$F1)*sin(2*PI*t)-$F1/2':text='●',$DT:fontsize=$F2:x='mod(t*w/2\,w)-$F2/4':y=h-$F2:text='█',$DT:fontsize=$F3:x=${WFX}-tw-$((F3 / 2)):y=h-$((F3 * 5 / 2)):text='кадр %{n}'"   # слева от плашки скопов, чтобы не лезть на подписи графиков
+# ● по кругу, вписанному в ширину кадра: один оборот в секунду, за кадр — ровно одно из OUTFPS положений
+# (77 точек в потоке 77 к/с, 60 в 60 и т.д.; угол от номера кадра n, не от t). Хвост кометы (2026-09-15, по
+# просьбе пользователя): TAILN точек вдоль дуги до ПРЕДЫДУЩЕГО положения (n-1), убывающие по размеру и
+# прозрачности. █ по нижнему краю (проход 2 с), номер кадра — слева от скопов.
+R="(w/2-$F1)"
+TAILN=6; TAIL=""
+for j in $(seq 1 $TAILN); do
+  fs=$(awk -v f="$F1" -v j="$j" -v n="$TAILN" 'BEGIN{printf "%d", f*(1-0.7*j/n)}')
+  al=$(awk -v j="$j" -v n="$TAILN" 'BEGIN{printf "%.2f", 0.75*(1-j/(n+1))}')
+  TAIL="$TAIL$DT:fontsize=$fs:fontcolor=0xFFD65A@$al:x='w/2+$R*cos(2*PI*(n-$j/$TAILN)/$OUTFPS)-$fs/3':y='h/2+$R*sin(2*PI*(n-$j/$TAILN)/$OUTFPS)-$fs/2':text='●',"
+done
+FX="${TAIL}$DT:fontsize=$F1:x='w/2+$R*cos(2*PI*n/$OUTFPS)-$F1/3':y='h/2+$R*sin(2*PI*n/$OUTFPS)-$F1/2':text='●',$DT:fontsize=$F2:x='mod(t*w/2\,w)-$F2/4':y=h-$F2:text='█',$DT:fontsize=$F3:x=${WFX}-tw-$((F3 / 2)):y=h-$((F3 * 5 / 2)):text='кадр %{n}'"
 # Скопы на частоте потока по копии 320x180: waveform / vectorscope (центр 96x96 из 256x256) / два
 # drawgraph по signalstats (освещённость YAVG, движение YDIF; ширина 1200 px = ~минута при 20 к/с,
 # затем scale до плашки), прозрачные (colorkey по чёрному, 85 %). YAVG для сборщика — из той же ветки.
