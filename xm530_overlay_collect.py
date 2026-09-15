@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сборщик телеметрии камеры ворот для оверлея (vorota_overlay.sh → vorota_overlay_render.py).
+"""Сборщик телеметрии камеры ворот для оверлея (xm530_overlay.sh → xm530_overlay_render.py).
 
 Аналог overlay_collect.sh с iMac и рендерера XPS, но данных о «машине» тут нет — вместо них сама камера
 (XM530 по DVRIP: кодировщик, экспозиция, день/ночь, шумодав, цвет, прожектор, система), Frigate
@@ -20,11 +20,11 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xm_dvrip  # noqa: E402
 
-DIR = os.environ.get("OV_DIR", "/tmp/vorota_overlay")
+DIR = os.environ.get("OV_DIR", "/tmp/xm530_overlay")
 CAM_IP = xm_dvrip.HOST
 FRIGATE = "http://127.0.0.1:5000/api"
-GO2RTC = "http://127.0.0.1:1984/api/streams?src=vorota_cam"   # чистый поток камеры (с 2026-09-15 vorota — с оверлеем)
-GO2RTC_AUTH = os.environ.get("GO2RTC_AUTH", "")   # "user:pass", передаёт vorota_overlay.sh
+GO2RTC = "http://127.0.0.1:1984/api/streams?src=xm530_cam"   # чистый поток камеры (с 2026-09-15 xm530 — с оверлеем)
+GO2RTC_AUTH = os.environ.get("GO2RTC_AUTH", "")   # "user:pass", передаёт xm530_overlay.sh
 HA_EXTRA = "http://192.168.77.2:8123/local/xps_overlay_extra.txt"
 
 
@@ -77,7 +77,7 @@ class Dvrip:
                 raise RuntimeError("DVRIP login: пауза после отказа")
             # файл-стоп: пока он есть, к DVRIP не ходим вообще (2026-09-15: чтобы дать блокировке admin
             # истечь без единой попытки; /config здесь — каталог конфига аддона Frigate)
-            if os.path.exists("/config/vorota_dvrip_pause"):
+            if os.path.exists("/config/xm530_dvrip_pause"):
                 self.fail_at = time.monotonic()
                 raise RuntimeError("DVRIP login: пауза после отказа")
             try:
@@ -174,27 +174,30 @@ class HwStats:
             la = self._read("/proc/loadavg").split()[0]
         except OSError:
             la = "?"
-        L.append("CPU: " + (f"{self.cpu:.1f} %" if self.cpu is not None else "…"))
-        L.append(f"- Нагрузка: {la} / {os.cpu_count()} ядер")
+        # 2026-09-15: частоты CPU/GPU слиты в строки CPU/GPU ради шрифта 1.6 (два списка впритык по высоте)
+        ghz = ""
         try:
             mhz = [float(l.split(":")[1]) for l in open("/proc/cpuinfo") if l.startswith("cpu MHz")]
-            L.append(f"- Частота: {sum(mhz) / len(mhz) / 1000:.2f} ГГц")
+            ghz = f", {sum(mhz) / len(mhz) / 1000:.2f} ГГц"
         except (OSError, ValueError, ZeroDivisionError):
             pass
+        L.append("CPU: " + (f"{self.cpu:.1f} %" if self.cpu is not None else "…") + ghz)
+        L.append(f"- Нагрузка: {la} / {os.cpu_count()} ядер")
         try:
             temps = {}
             for z in os.listdir("/sys/class/thermal"):
                 if z.startswith("thermal_zone"):
                     temps[self._read(f"/sys/class/thermal/{z}/type")] = int(self._read(f"/sys/class/thermal/{z}/temp")) / 1000
             tv = temps.get("x86_pkg_temp") or max(temps.values())
-            L.append(f"- Температура: {tv:.0f} °C")
+            L.append(f"- Темп.: {tv:.0f} °C")
         except (OSError, ValueError):
             pass
-        L.append("GPU (i915, VAAPI): " + (f"{self.gpu:.1f} %" if self.gpu is not None else "…"))
+        gmhz = ""
         try:
-            L.append(f"- Частота: {self._read('/sys/class/drm/card0/gt_act_freq_mhz')} / {self._read('/sys/class/drm/card0/gt_max_freq_mhz')} МГц")
+            gmhz = f", {self._read('/sys/class/drm/card0/gt_act_freq_mhz')} МГц"
         except OSError:
             pass
+        L.append("GPU: " + (f"{self.gpu:.1f} %" if self.gpu is not None else "…") + gmhz)   # i915/VAAPI, занятость по rc6
         try:
             mi = {}
             for l in open("/proc/meminfo"):
@@ -210,7 +213,7 @@ def camera_lines(d):
     L = []
     enc = (d.slow.get("Simplify.Encode") or {}).get("MainFormat", {}).get("Video", {})
     L.append("# Поток")
-    L.append("Камера: XM530 IPG-X4C-WER")
+    L.append("Камера: IPG-X4C-WER")   # чип XM530
     # 2026-09-15: строки «Объективы: 2 (широкий + зум)» и «Разрешение: 1920x2160 пикс.» убраны ради шрифта 1.3 —
     # статичные, оба списка в base заполняют высоту впритык
     if enc:
@@ -270,28 +273,28 @@ def camera_param_lines(d):
 
 def frigate_lines(stats, ptz):
     L = ["# Frigate"]
-    c = (stats or {}).get("cameras", {}).get("vorota", {})
+    c = (stats or {}).get("cameras", {}).get("xm530", {})
     if c:
         L.append(f"Захват: {c.get('camera_fps', '?')} к/с")
         L.append(f"- Детекция: {c.get('detection_fps', '?')} к/с")
         # «Пропущено к/с», «Захват %», «Детект %» убраны 2026-09-15 ради шрифта 1.3 (см. выше про высоту)
         L.append("Связь: " + {"excellent": "отличная", "good": "хорошая", "fair": "средняя", "poor": "плохая"}.get(c.get("connection_quality"), str(c.get("connection_quality", "?"))))
-        L.append(f"- Обрывов за час: {c.get('reconnects_last_hour', '?')}")
-        L.append(f"- Задержек за час: {c.get('stalls_last_hour', '?')}")
+        L.append(f"- Обрывов/ч: {c.get('reconnects_last_hour', '?')}")
+        L.append(f"- Задержек/ч: {c.get('stalls_last_hour', '?')}")
         L.append(f"CPU записи: {c.get('ffmpeg_cpu', '?')} %")
     det = (stats or {}).get("detectors", {})
     for name, dv in det.items():
-        L.append(f"Инференс ({name}): {dv.get('inference_speed', '?')} мс")
+        L.append(f"Инференс: {dv.get('inference_speed', '?')} мс")   # детектор {name}
         break
     st = (stats or {}).get("service", {}).get("storage", {}).get("/media/frigate/recordings", {})
     if st:
-        L.append(f"Диск свободно: {st.get('free', 0) / 1024:.1f} ГБ")
+        L.append(f"Диск: {st.get('free', 0) / 1024:.1f} ГБ")   # свободно
     if ptz:
         L.append("# PTZ")
         feats = ptz.get("features", [])
-        L.append("Поворот/наклон: " + ("есть" if "pt" in feats else "нет"))
-        L.append("- Зум: " + ("есть" if "zoom" in feats else "нет"))
-        L.append("- Фокус: " + ("есть" if "focus" in feats else "нет"))
+        # 2026-09-15: три строки «есть/нет» слиты в одну ради шрифта 1.6
+        axes = [n for f, n in (("pt", "PT"), ("zoom", "зум"), ("focus", "фокус")) if f in feats]
+        L.append("Оси: " + (", ".join(axes) if axes else "нет"))
         L.append(f"Пресетов: {len(ptz.get('presets', []))}")
     return L
 
@@ -317,7 +320,7 @@ def main():
             d.refresh_slow()
         if n % 30 == 0:
             try:
-                ptz = json.loads(http(f"{FRIGATE}/vorota/ptz/info"))
+                ptz = json.loads(http(f"{FRIGATE}/xm530/ptz/info"))
             except Exception:
                 ptz = None
         n += 1
@@ -371,23 +374,22 @@ def main():
 
         L = camera_lines(d)
         if bitrate:
-            L.append(f"Битрейт факт.: {bitrate}")
+            L.append(f"Битрейт: {bitrate}")
         if fps:
-            L.append(f"К/с в оверлее: {fps}")
+            L.append(f"Кадров/с: {fps}")
         if light:
-            L.append(f"Освещённость: {light}")
+            L.append(f"Свет: {light}")
         if sound:
             L.append(f"Звук: {sound}")
         L += camera_param_lines(d)
         L.append("[center]")
         L.append("# Сеть")
-        L.append(f"Адрес LAN: {CAM_IP}")
+        L.append(f"IP: {CAM_IP}")
         L.append("- Линк: Wi-Fi, сеть 77")
-        # «MAC: 60:de:f4:1b:7b:2e» убран 2026-09-15 ради шрифта 1.3 (есть в device_credentials/vorota.txt)
-        L.append(f"Отклик (TCP): {ping}")
-        L.append("Путь: камера→go2rtc→ffmpeg")
-        L.append("- Декод: программный (HEVC)")
-        L.append("- Кодер оверлея: h264_vaapi")
+        # «MAC: 60:de:f4:1b:7b:2e» убран 2026-09-15 ради шрифта 1.3 (есть в device_credentials/xm530.txt)
+        L.append(f"Отклик: {ping}")
+        # «Путь: камера→go2rtc→ffmpeg», «Декод: программный (HEVC)», «Кодер оверлея: h264_vaapi» убраны 2026-09-15
+        # ради шрифта 1.4 — статичные и самые длинные строки левого списка (ширина двух списков впритык к 960 px)
         si = d.sysinfo or {}
         if si:
             L.append("# Система")
@@ -401,7 +403,14 @@ def main():
         L += hw.lines()
         L.append("[right]")
         if extra:
-            L += [ln for ln in extra.split("\n") if ln and not ln.startswith("[")]
+            # 2026-09-15: подписи HA укорочены здесь (файл общий с XPS/iMac, автоматизацию не трогаем) —
+            # ради шрифта 1.5 в base ширина правого списка упиралась в «Температура на улице»
+            short = {"Температура на улице": "На улице", "Потребление дома": "Потребление", "Люди в кадрах камер:": "Люди в кадрах:"}
+            for ln in extra.split("\n"):
+                if ln and not ln.startswith("["):
+                    for a, b in short.items():
+                        ln = ln.replace(a, b)
+                    L.append(ln)
         # четвёртая плашка внизу слева (как GPU-блок на XPS): Frigate и PTZ — иначе при крупном шрифте
         # три верхних столбика не помещаются в 1920 px по ширине
         L.append("[bottomleft]")

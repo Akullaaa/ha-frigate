@@ -24,4 +24,5 @@ backup_config.yaml
 .runtime_state.json.lock
 .runtime_state.json
 logs/
-vorota_dvrip_pause
+xm530_dvrip_pause
+frigate.db.bak*

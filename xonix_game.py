@@ -4,7 +4,7 @@
 соревнуются, кто первым дотянет до порога (порог зависит от сложности,
 см. DIFFICULTY_PRESETS, переключается с дашборда через MQTT). Незанятая
 часть поля — общая фоновая камера (dvor). Территория игрока 1 открывает
-камеру vorota, игрока 2 — камеру tambur, обе теперь декодируются в
+камеру xm530, игрока 2 — камеру tambur, обе теперь декодируются в
 ПОЛНОМ размере холста (не в половину, как раньше), потому что владение
 клетками больше не привязано к фиксированной половине экрана.
 
@@ -38,7 +38,7 @@ xonix/game/board и публикует направление в xonix/game/p{1,
 те же, что у Frigate detect/record) — ровно одно физическое подключение на
 камеру, как и в xonix_compositor_cameras.py (правило проекта).
 
-Три ffmpeg-процесса декодирования (dvor фон, vorota P1, tambur P2) +
+Три ffmpeg-процесса декодирования (dvor фон, xm530 P1, tambur P2) +
 MQTT-клиент в фоновом потоке + сам игровой цикл, который пишет готовые
 кадры в stdout — снаружи их забирает xonix_game.sh (encode h264_vaapi ->
 RTSP push в go2rtc, тот же паттерн, что xonix_layer_multicam.sh).
@@ -101,7 +101,7 @@ DIRS = {
 OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
 # --- камеры -----------------------------------------------------------
-# vorota/tambur теперь декодируются в полный размер холста — владение
+# xm530/tambur теперь декодируются в полный размер холста — владение
 # клеткой больше не привязано к фиксированной половине экрана.
 
 CAMERAS = {
@@ -111,9 +111,9 @@ CAMERAS = {
         "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
     ],
-    "vorota": [
+    "xm530": [
         FF, "-nostdin", "-loglevel", "warning", "-vaapi_device", "/dev/dri/renderD128",
-        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/vorota",
+        "-rtsp_transport", "tcp", "-i", "rtsp://127.0.0.1:8554/xm530",
         "-vf", f"format=nv12,hwupload,scale_vaapi={CANVAS_W}:{CANVAS_H},hwdownload,format=nv12,format=bgr24",
         "-r", str(FPS), "-f", "rawvideo", "-",
     ],
@@ -922,7 +922,7 @@ def flash_win(stdout, game_frame: np.ndarray, field: "Field", winner: str) -> No
 def render(field: Field) -> np.ndarray:
     with frames_lock:
         canvas = latest_frames["dvor"].copy()
-        cam = {"p1": latest_frames["vorota"], "p2": latest_frames["tambur"]}
+        cam = {"p1": latest_frames["xm530"], "p2": latest_frames["tambur"]}
 
     for player in ("p1", "p2"):
         color = PLAYER_COLOR[player]

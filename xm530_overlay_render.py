@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Рендер прозрачного PNG-слоя с телеметрией для потока камеры ворот (vorota_overlay.sh).
+"""Рендер прозрачного PNG-слоя с телеметрией для потока камеры ворот (xm530_overlay.sh).
 
 Порт overlay_render.swift с iMac (/config/imac_camera в основном репозитории) на PIL — тот же дизайн,
 что у iMac и XPS: три плашки-столбика с подгруппами у краёв кадра. Левый и средний — обычное дерево
 слева направо, правый — зеркальное «JSON-дерево»: подписи у правого края, значения слева от них,
 выровнены по общей вертикальной границе столбика.
 
-Вход: DIR/telemetry.txt (пишет vorota_overlay_collect.py): "# Имя" — заголовок подгруппы (жёлтый, воздух
+Вход: DIR/telemetry.txt (пишет xm530_overlay_collect.py): "# Имя" — заголовок подгруппы (жёлтый, воздух
 сверху); "- текст" — вложенный пункт; "[left]"/"[center]"/"[right]" — переключение столбика; прочие
 маркеры [xx] игнорируются. Строка "Подпись: значение" рисуется двумя колонками.
 "[bottomleft]" — четвёртая плашка внизу слева (как на XPS), прижата к нижнему краю кадра.
@@ -25,7 +25,7 @@ from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont
 
-DIR = os.environ.get("OV_DIR", "/tmp/vorota_overlay")
+DIR = os.environ.get("OV_DIR", "/tmp/xm530_overlay")
 W = int(os.environ.get("OV_W", "1920"))
 H = int(os.environ.get("OV_H", "2160"))
 S = float(os.environ.get("OV_SCALE", "1.8"))
@@ -34,12 +34,12 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 pad = int(10 * S)          # отступ плашки от края кадра
 box_pad = int(8 * S)       # внутренний отступ плашки
 indent = int(14 * S)       # отступ строк первого уровня под заголовком; вложенные — вдвое
-group_gap = int(6 * S)     # воздух перед заголовком подгруппы
+group_gap = int(4 * S)     # воздух перед заголовком подгруппы (2026-09-15: было 6·S, ужато ради шрифта 1.6)
 value_gap = int(12 * S)    # зазор между значением и подписью в правом столбике
 radius = int(8 * S)
 body_font = ImageFont.truetype(FONT, int(17 * S))
 head_font = ImageFont.truetype(FONT, int(18 * S))
-stroke = max(1, int(2 * S / 1.5))
+stroke = 1   # 2026-09-15: тонкий контур по просьбе пользователя (было max(1, int(2·S/1.5)) → 2 px при S≥1.5)
 # 2026-09-15, по просьбе пользователя: подложек нет (PLATE полностью прозрачна и не рисуется), сам текст
 # полупрозрачный (~2/3), обводка тоже полупрозрачная — читаемость держит именно она.
 BODY = (255, 255, 255, 175)
@@ -55,7 +55,7 @@ def text_w(t, font):
 
 def line_h(font):
     a, d = font.getmetrics()
-    return a + d + int(2 * S)   # 2026-09-15: было 3·S, ужато ради двух полных списков в base
+    return a + d + int(1 * S)   # 2026-09-15: было 3·S, потом 2·S — ужато ради двух полных списков в base при шрифте 1.5
 
 
 body_h = line_h(body_font)
@@ -216,7 +216,7 @@ def draw_scopes(d):
 
 
 # Кольцо из OV_FPS точек по орбите шарика ● (2026-09-15, по просьбе пользователя: «крутящийся кружочек с 25
-# точками»). Геометрия — та же, что у drawtext в vorota_overlay.sh: центр кадра, радиус w/2-F1, за кадр шарик
+# точками»). Геометрия — та же, что у drawtext в xm530_overlay.sh: центр кадра, радиус w/2-F1, за кадр шарик
 # шагает ровно на одну точку, так что при OUTFPS=25 он обходит все 25 за секунду. Точки статичны и живут в
 # PNG-слое — без затрат на кадр; «крутит» кольцо сам шарик с хвостом.
 RING_N = int(os.environ.get("OV_FPS", "0") or 0)
@@ -291,7 +291,8 @@ def render_two_lists(d, cols, noclock):
 
 def render(noclock):
     now = datetime.now()
-    clock = now.strftime("%Y-%m-%d  %H:%M:%S.") + f"{now.microsecond // 100:04d} (0000000)"   # хвост — резерв ширины под счётчик кадров ffmpeg
+    # 2026-09-15: без даты (она в OSD камеры внизу слева) — строка часов была самой широкой в левом списке при шрифте 1.6
+    clock = now.strftime("%H:%M:%S.") + f"{now.microsecond // 100:04d} (0000000)"   # хвост — резерв ширины под счётчик кадров ffmpeg
     cols = read_columns(clock)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)

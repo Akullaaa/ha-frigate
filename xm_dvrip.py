@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Копия /config/.local/bin/vorota_dvrip.py для контейнера Frigate (ему не виден /config HA): DVRIP-клиент XM530 для
-# сборщика оверлея vorota_overlay_collect.py. Правки — синхронно с оригиналом.
-"""Клиент бинарного SDK-протокола DVRIP/NetSurveillance ("Sofia") камеры vorota
+# Копия /config/.local/bin/xm530_dvrip.py для контейнера Frigate (ему не виден /config HA): DVRIP-клиент XM530 для
+# сборщика оверлея xm530_overlay_collect.py. Правки — синхронно с оригиналом.
+"""Клиент бинарного SDK-протокола DVRIP/NetSurveillance ("Sofia") камеры xm530
 (192.168.77.30:34567, до 2026-09-15 — 10.0.0.12) — по образцу /config/.local/bin/dvor_dvrip.py (та же платформа
 камеры, тот же протокол). В отличие от dvor, отдельную DVRIP-учётку здесь не
 заводили — подошли штатные ONVIF-креды (ahuser/bbbbbbb7), они же общие для
@@ -14,7 +14,7 @@
 эффекта на видео (RTSP stream=0) не даёт ни сразу, ни после переподключения,
 ни после полной перезагрузки камеры. Причина не выяснена (возможно, эта модель/
 прошивка не применяет параметр к каналу кодирования, либо связано со сдвоенным
-кадром 1920x2160 камеры — см. project_vorota_dvrip_flip.md). Оставлено включённым
+кадром 1920x2160 камеры — см. project_xm530_dvrip_flip.md). Оставлено включённым
 как есть, реальный переворот сделан софтверно (-vf vflip в config.yaml Frigate).
 
 Write-операции пользователей (Add/ModifyUser и т.д., msgId 1476+) НЕ проверялись
@@ -28,7 +28,7 @@ import struct
 HOST = "192.168.77.30"  # камера ворот в сети 77 (с 2026-09-15)
 PORT = 34567
 USERNAME = "admin"
-PASSWORD = ""  # после сброса 2026-09-15 пароль admin пустой (см. device_credentials/vorota.txt в /config)
+PASSWORD = ""  # после сброса 2026-09-15 пароль admin пустой (см. device_credentials/xm530.txt в /config)
 
 MSG_LOGIN_REQ = 1000
 MSG_CONFIG_SET_REQ = 1040
