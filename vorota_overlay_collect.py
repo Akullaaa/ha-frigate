@@ -170,7 +170,7 @@ def frigate_lines(stats, ptz):
         L.append(f"Захват: {c.get('camera_fps', '?')} к/с")
         L.append(f"- Детекция: {c.get('detection_fps', '?')} к/с")
         L.append(f"- Пропущено: {c.get('skipped_fps', '?')} к/с")
-        L.append("Связь: " + {"good": "хорошая", "fair": "средняя", "poor": "плохая"}.get(c.get("connection_quality"), str(c.get("connection_quality", "?"))))
+        L.append("Связь: " + {"excellent": "отличная", "good": "хорошая", "fair": "средняя", "poor": "плохая"}.get(c.get("connection_quality"), str(c.get("connection_quality", "?"))))
         L.append(f"- Обрывов за час: {c.get('reconnects_last_hour', '?')}")
         L.append(f"- Задержек за час: {c.get('stalls_last_hour', '?')}")
         L.append(f"CPU ffmpeg записи: {c.get('ffmpeg_cpu', '?')} %")
