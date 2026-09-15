@@ -40,10 +40,13 @@ radius = int(8 * S)
 body_font = ImageFont.truetype(FONT, int(17 * S))
 head_font = ImageFont.truetype(FONT, int(18 * S))
 stroke = max(1, int(2 * S / 1.5))
-BODY = (255, 255, 255, 240)
-LABEL = (209, 209, 209, 235)
-HEAD = (255, 214, 89, 250)
-PLATE = (0, 0, 0, 107)     # 42 % чёрного
+# 2026-09-15, по просьбе пользователя: подложек нет (PLATE полностью прозрачна и не рисуется), сам текст
+# полупрозрачный (~2/3), обводка тоже полупрозрачная — читаемость держит именно она.
+BODY = (255, 255, 255, 175)
+LABEL = (209, 209, 209, 165)
+HEAD = (255, 214, 89, 185)
+PLATE = (0, 0, 0, 0)       # было (0,0,0,107) — 42 % чёрного
+STROKE = (0, 0, 0, 235)   # контур контрастнее (по просьбе пользователя, было 150)
 
 
 def text_w(t, font):
@@ -52,7 +55,7 @@ def text_w(t, font):
 
 def line_h(font):
     a, d = font.getmetrics()
-    return a + d + int(3 * S)
+    return a + d + int(2 * S)   # 2026-09-15: было 3·S, ужато ради двух полных списков в base
 
 
 body_h = line_h(body_font)
@@ -133,7 +136,8 @@ def draw_col(d, L, box_x, clock_spacer=False, noclock=False, box_y=None):
         return
     if box_y is None:
         box_y = pad
-    d.rounded_rectangle([box_x, box_y, box_x + L["box_w"], box_y + L["box_h"]], radius=radius, fill=PLATE)
+    if PLATE[3]:
+        d.rounded_rectangle([box_x, box_y, box_x + L["box_w"], box_y + L["box_h"]], radius=radius, fill=PLATE)
     edge = box_x + L["box_w"] - box_pad if L["rtl"] else box_x + box_pad
 
     def ax(rel, width):
@@ -153,17 +157,17 @@ def draw_col(d, L, box_x, clock_spacer=False, noclock=False, box_y=None):
                     os.replace(f"{DIR}/clock_pos.txt.tmp", f"{DIR}/clock_pos.txt")
                     clock_pos_written = pos
             else:
-                d.text((ax(0, tw), y), it["text"], font=head_font, fill=HEAD, stroke_width=stroke, stroke_fill="black")
+                d.text((ax(0, tw), y), it["text"], font=head_font, fill=HEAD, stroke_width=stroke, stroke_fill=STROKE)
             y += head_h
         else:
             if it["label"]:
                 lw = text_w(it["label"], body_font)
                 vw = text_w(it["value"], body_font)
-                d.text((ax(L["boundary"] - lw, lw), y), it["label"], font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill="black")
-                d.text((ax(L["boundary"] + value_gap, vw), y), it["value"], font=body_font, fill=BODY, stroke_width=stroke, stroke_fill="black")
+                d.text((ax(L["boundary"] - lw, lw), y), it["label"], font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill=STROKE)
+                d.text((ax(L["boundary"] + value_gap, vw), y), it["value"], font=body_font, fill=BODY, stroke_width=stroke, stroke_fill=STROKE)
             else:
                 tw = text_w(it["text"], body_font)
-                d.text((ax(it["off"], tw), y), it["text"], font=body_font, fill=BODY, stroke_width=stroke, stroke_fill="black")
+                d.text((ax(it["off"], tw), y), it["text"], font=body_font, fill=BODY, stroke_width=stroke, stroke_fill=STROKE)
             y += body_h
         if y > box_y + L["box_h"] - box_pad:
             break
@@ -174,13 +178,19 @@ def draw_col(d, L, box_x, clock_spacer=False, noclock=False, box_y=None):
 # Плашка + подписи здесь, содержимое (waveform/vectorscope/графики) — ffmpeg по scopes_geom.txt.
 SS = float(os.environ.get("OV_SCOPE_SCALE", str(S * 0.75)))
 SC_W, SC_H = int(720 * SS), int(150 * SS)
-SC_X, SC_Y = W - pad - SC_W, H - pad - SC_H
+SC_Y = H - pad - SC_H
+# в раскладке «два списка» скопы внизу по центру (между OSD камеры слева и правым списком), иначе — справа
+SC_X = int(0.27 * W) if os.environ.get("OV_TWO_LISTS") == "1" else W - pad - SC_W
 _in = int(8 * SS)
-_lab = body_h
+# 2026-09-15: шрифты блока скопов — от масштаба скопов SS, а не от S: в режиме base (S=1.2, SS=0.66) подписи
+# основным шрифтом вылезали за узкую плашку.
+sc_head_font = ImageFont.truetype(FONT, int(18 * SS))
+sc_body_font = ImageFont.truetype(FONT, int(17 * SS))
+_lab = line_h(sc_body_font)
 WF_W, WF_H = int(320 * SS), int(96 * SS)
 VS_S = int(96 * SS)
 G_W, G_H = int(248 * SS), int(40 * SS)
-WF_X, WF_Y = SC_X + _in, SC_Y + _in + head_h + _lab
+WF_X, WF_Y = SC_X + _in, SC_Y + _in + line_h(sc_head_font) + _lab
 VS_X, VS_Y = WF_X + WF_W + _in, WF_Y
 G_X = VS_X + VS_S + _in
 G1_Y = WF_Y
@@ -190,12 +200,13 @@ scopes_written = False
 
 def draw_scopes(d):
     global scopes_written
-    d.rounded_rectangle([SC_X, SC_Y, SC_X + SC_W, SC_Y + SC_H], radius=radius, fill=PLATE)
-    d.text((SC_X + _in, SC_Y + _in), "Сигнал", font=head_font, fill=HEAD, stroke_width=stroke, stroke_fill="black")
-    d.text((WF_X, WF_Y - _lab), "яркость (waveform)", font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill="black")
-    d.text((VS_X, VS_Y - _lab), "цвет", font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill="black")
-    d.text((G_X, G1_Y - _lab), "освещённость, 1 мин", font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill="black")
-    d.text((G_X, G2_Y - _lab), "движение (YDIF), 1 мин", font=body_font, fill=LABEL, stroke_width=stroke, stroke_fill="black")
+    if PLATE[3]:
+        d.rounded_rectangle([SC_X, SC_Y, SC_X + SC_W, SC_Y + SC_H], radius=radius, fill=PLATE)
+    d.text((SC_X + _in, SC_Y + _in), "Сигнал", font=sc_head_font, fill=HEAD, stroke_width=stroke, stroke_fill=STROKE)
+    d.text((WF_X, WF_Y - _lab), "яркость (waveform)", font=sc_body_font, fill=LABEL, stroke_width=stroke, stroke_fill=STROKE)
+    d.text((VS_X, VS_Y - _lab), "цвет", font=sc_body_font, fill=LABEL, stroke_width=stroke, stroke_fill=STROKE)
+    d.text((G_X, G1_Y - _lab), "освещённость, 1 мин", font=sc_body_font, fill=LABEL, stroke_width=stroke, stroke_fill=STROKE)
+    d.text((G_X, G2_Y - _lab), "движение (YDIF), 1 мин", font=sc_body_font, fill=LABEL, stroke_width=stroke, stroke_fill=STROKE)
     if not scopes_written:
         geom = f"{WF_X} {WF_Y} {WF_W} {WF_H} {VS_X} {VS_Y} {VS_S} {G_X} {G1_Y} {G2_Y} {G_W} {G_H}"
         with open(f"{DIR}/scopes_geom.txt.tmp", "w") as f:
@@ -204,22 +215,110 @@ def draw_scopes(d):
         scopes_written = True
 
 
+# Кольцо из OV_FPS точек по орбите шарика ● (2026-09-15, по просьбе пользователя: «крутящийся кружочек с 25
+# точками»). Геометрия — та же, что у drawtext в vorota_overlay.sh: центр кадра, радиус w/2-F1, за кадр шарик
+# шагает ровно на одну точку, так что при OUTFPS=25 он обходит все 25 за секунду. Точки статичны и живут в
+# PNG-слое — без затрат на кадр; «крутит» кольцо сам шарик с хвостом.
+RING_N = int(os.environ.get("OV_FPS", "0") or 0)
+RING_RGBA = (255, 214, 89, 150)
+
+
+def draw_ring(d):
+    if RING_N <= 0:
+        return
+    import math
+    f1 = int(21 * S)
+    r_orb = W / 2 - f1
+    r_dot = max(2, int(f1 * 0.18))
+    for k in range(RING_N):
+        a = 2 * math.pi * k / RING_N
+        x, y = W / 2 + r_orb * math.cos(a), H / 2 + r_orb * math.sin(a)
+        d.ellipse((x - r_dot, y - r_dot, x + r_dot, y + r_dot), fill=RING_RGBA, outline=(0, 0, 0, 140))
+
+
+# Два списка деревом (OV_TWO_LISTS=1, режим base, 2026-09-15 по просьбе пользователя): левый — часы, Поток,
+# Сеть, Система, Камера (DVRIP), Frigate, PTZ как подгруппы одного дерева; правый — зеркальное дерево HA, под ним
+# скопы. Левый список пакуется по высоте (H минус нижняя полоса RESERVE под OSD камеры и «кадр N») целыми
+# подгруппами; не влезшие подгруппы уходят во вторую колонку правее — так при возврате DVRIP-секций ничего не
+# обрежется. Чужие режимы (три плашки + нижняя левая) не затронуты.
+TWO_LISTS = os.environ.get("OV_TWO_LISTS") == "1"
+RESERVE = int(60 * S)
+
+
+def split_groups(lines):
+    groups, cur = [], []
+    for ln in lines:
+        if ln[0] == "head" and cur:
+            groups.append(cur); cur = []
+        cur.append(ln)
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def group_h(g):
+    return sum(head_h if k == "head" else body_h for k, _, _ in g) + group_gap
+
+
+def render_two_lists(d, cols, noclock):
+    # обе колонки ограничены снизу скопами (они внизу по центру и заходят под обе по x)
+    max_h = SC_Y - group_gap - pad - 2 * box_pad
+    # Home Assistant — всегда справа и первым; остальные подгруппы по порядку: влезает слева — слева, иначе
+    # справа под HA («первое подходящее»: так PTZ остаётся слева, даже если Frigate перед ним ушёл направо)
+    right, rh = [], 0
+    for g in split_groups(cols[2]):
+        right += g; rh += group_h(g)
+    left, lh, rest = [], 0, []
+    for g in split_groups(cols[0] + cols[1] + cols[3]):
+        gh = group_h(g)
+        if not left or lh + gh <= max_h:
+            left += g; lh += gh
+        elif rh + gh <= max_h:
+            right += g; rh += gh
+        else:
+            rest.append(g)
+    if rest:
+        print("render: не поместились подгруппы:", [g[0][1] for g in rest], file=sys.stderr)
+    L = layout(left, False)
+    L["box_h"] = min(L["box_h"], max_h + 2 * box_pad)
+    draw_col(d, L, pad, clock_spacer=True, noclock=noclock)
+    R = layout(right, True)
+    R["box_h"] = min(R["box_h"], max_h + 2 * box_pad)
+    draw_col(d, R, W - pad - R["box_w"])
+    draw_scopes(d)
+    draw_ring(d)
+
+
 def render(noclock):
     now = datetime.now()
-    clock = now.strftime("%Y-%m-%d  %H:%M:%S.") + f"{now.microsecond // 100:04d}"
+    clock = now.strftime("%Y-%m-%d  %H:%M:%S.") + f"{now.microsecond // 100:04d} (0000000)"   # хвост — резерв ширины под счётчик кадров ffmpeg
     cols = read_columns(clock)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+    if TWO_LISTS:
+        render_two_lists(d, cols, noclock)
+        tmp, dst = f"{DIR}/overlay.png.tmp", f"{DIR}/overlay.png"
+        img.save(tmp, "PNG", compress_level=1)
+        os.replace(tmp, dst)
+        return
     Ls = [layout(cols[0], False), layout(cols[1], False), layout(cols[2], True), layout(cols[3], False)]
     used = sum(L["box_w"] for L in Ls[:3])
-    gap = max(4, (W - 2 * pad - used) / 2)
     draw_col(d, Ls[0], pad, clock_spacer=True, noclock=noclock)
-    draw_col(d, Ls[1], int(pad + Ls[0]["box_w"] + gap))
-    draw_col(d, Ls[2], W - pad - Ls[2]["box_w"])
+    if used + 2 * pad + 2 * 4 <= W:
+        gap = max(4, (W - 2 * pad - used) / 2)
+        draw_col(d, Ls[1], int(pad + Ls[0]["box_w"] + gap))
+        draw_col(d, Ls[2], W - pad - Ls[2]["box_w"])
+    else:
+        # 2026-09-15: крупный шрифт в режиме base (960x1080, S=1.2) — три колонки в ширину не помещаются:
+        # «Сеть» прижимается к правому краю, «Home Assistant» — под неё, тоже у правого края.
+        draw_col(d, Ls[1], W - pad - Ls[1]["box_w"])
+        y3 = pad + max(Ls[0]["box_h"], Ls[1]["box_h"]) + 2 * group_gap
+        draw_col(d, Ls[2], W - pad - Ls[2]["box_w"], box_y=y3)
     # нижняя-левая плашка прижата к нижнему краю; выше неё не залезает на верхнюю левую (высоты считает layout)
     bl_y = max(pad + Ls[0]["box_h"] + group_gap, H - pad - Ls[3]["box_h"])
     draw_col(d, Ls[3], pad, box_y=bl_y)
     draw_scopes(d)
+    draw_ring(d)
     tmp, dst = f"{DIR}/overlay.png.tmp", f"{DIR}/overlay.png"
     img.save(tmp, "PNG", compress_level=1)
     os.replace(tmp, dst)

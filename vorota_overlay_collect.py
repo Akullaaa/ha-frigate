@@ -65,19 +65,27 @@ class Dvrip:
         self.sysinfo = None
         self.slow = {}
         self.fail_at = -1e9   # monotonic-время последнего неудачного логина
+        self.backoff = 15     # пауза после отказа, с: 15 → 30 → … → 600 (сброс при успехе)
 
     def _ensure(self):
         if self.s is None:
             # 2026-09-15: учётка admin была найдена заблокированной (Ret 205 «пользователь заблокирован»).
             # Раньше при любом отказе refresh_slow делал до 6 новых логинов за цикл каждые 2 с — сам
-            # подкармливал блокировку. Теперь после отказа — пауза 60 с, потом одна попытка.
-            if time.monotonic() - self.fail_at < 60:
+            # подкармливал блокировку. Теперь после отказа — растущая пауза (15 с … 10 мин), потом одна попытка:
+            # короткая в начале, потому что после быстрого перезапуска потока XM штатно отказывает несколько секунд.
+            if time.monotonic() - self.fail_at < self.backoff:
+                raise RuntimeError("DVRIP login: пауза после отказа")
+            # файл-стоп: пока он есть, к DVRIP не ходим вообще (2026-09-15: чтобы дать блокировке admin
+            # истечь без единой попытки; /config здесь — каталог конфига аддона Frigate)
+            if os.path.exists("/config/vorota_dvrip_pause"):
+                self.fail_at = time.monotonic()
                 raise RuntimeError("DVRIP login: пауза после отказа")
             try:
                 s = xm_dvrip.DvripSession()
                 r = s.login()
             except Exception:
                 self.fail_at = time.monotonic()
+                self.backoff = min(self.backoff * 2, 600)
                 raise
             if r.get("Ret") != 100:
                 try:
@@ -85,8 +93,11 @@ class Dvrip:
                 except Exception:
                     pass
                 self.fail_at = time.monotonic()
+                self.backoff = min(self.backoff * 2, 600)
+                print(f"dvrip login Ret {r.get('Ret')}, следующая попытка через {self.backoff} с", file=sys.stderr)
                 raise RuntimeError(f"DVRIP login Ret {r.get('Ret')}")
             self.s = s
+            self.backoff = 15
 
     def get(self, name):
         self._ensure()
@@ -109,12 +120,90 @@ class Dvrip:
                 self.slow[key] = self.get(key)
             except Exception as e:
                 self.slow.setdefault(key, None)
-                print("dvrip", key, e, file=sys.stderr)
+                if "пауза после отказа" not in str(e):   # сам отказ уже залогирован в _ensure, паузу не повторять
+                    print("dvrip", key, e, file=sys.stderr)
         if self.sysinfo is None:
             try:
                 self.sysinfo = self.system_info()
             except Exception as e:
-                print("dvrip SystemInfo", e, file=sys.stderr)
+                if "пауза после отказа" not in str(e):
+                    print("dvrip SystemInfo", e, file=sys.stderr)
+
+
+class HwStats:
+    """Железо хоста (Оптиплекс, общий с HA/Frigate): CPU по /proc/stat, GPU i915 по rc6_residency_ms
+    (занятость = 1 − Δпростоя/Δвремени), температура пакета, частоты, память. Всё — sysfs/procfs хоста,
+    видны из контейнера Frigate. Разницы считаются между вызовами (раз в цикл, 2 с). 2026-09-15 по просьбе
+    пользователя («остальные параметры по железу, GPU, нагрузка»)."""
+
+    def __init__(self):
+        self.p_stat = None
+        self.p_rc6 = None
+        self.p_t = None
+        self.cpu = self.gpu = None
+
+    @staticmethod
+    def _read(path):
+        with open(path) as f:
+            return f.read().strip()
+
+    def tick(self):
+        t = time.monotonic()
+        try:
+            f = self._read("/proc/stat").split("\n")[0].split()[1:]
+            v = list(map(int, f))
+            idle, total = v[3] + v[4], sum(v)
+            if self.p_stat:
+                di, dt = idle - self.p_stat[0], total - self.p_stat[1]
+                if dt > 0:
+                    self.cpu = 100 * (1 - di / dt)
+            self.p_stat = (idle, total)
+        except (OSError, ValueError, IndexError):
+            pass
+        try:
+            rc6 = int(self._read("/sys/class/drm/card0/power/rc6_residency_ms"))
+            if self.p_rc6 is not None and t > self.p_t:
+                self.gpu = max(0.0, min(100.0, 100 * (1 - (rc6 - self.p_rc6) / ((t - self.p_t) * 1000))))
+            self.p_rc6, self.p_t = rc6, t
+        except (OSError, ValueError):
+            pass
+
+    def lines(self):
+        L = ["# Железо (Оптиплекс)"]
+        try:
+            la = self._read("/proc/loadavg").split()[0]
+        except OSError:
+            la = "?"
+        L.append("CPU: " + (f"{self.cpu:.1f} %" if self.cpu is not None else "…"))
+        L.append(f"- Нагрузка: {la} / {os.cpu_count()} ядер")
+        try:
+            mhz = [float(l.split(":")[1]) for l in open("/proc/cpuinfo") if l.startswith("cpu MHz")]
+            L.append(f"- Частота: {sum(mhz) / len(mhz) / 1000:.2f} ГГц")
+        except (OSError, ValueError, ZeroDivisionError):
+            pass
+        try:
+            temps = {}
+            for z in os.listdir("/sys/class/thermal"):
+                if z.startswith("thermal_zone"):
+                    temps[self._read(f"/sys/class/thermal/{z}/type")] = int(self._read(f"/sys/class/thermal/{z}/temp")) / 1000
+            tv = temps.get("x86_pkg_temp") or max(temps.values())
+            L.append(f"- Температура: {tv:.0f} °C")
+        except (OSError, ValueError):
+            pass
+        L.append("GPU (i915, VAAPI): " + (f"{self.gpu:.1f} %" if self.gpu is not None else "…"))
+        try:
+            L.append(f"- Частота: {self._read('/sys/class/drm/card0/gt_act_freq_mhz')} / {self._read('/sys/class/drm/card0/gt_max_freq_mhz')} МГц")
+        except OSError:
+            pass
+        try:
+            mi = {}
+            for l in open("/proc/meminfo"):
+                k, v = l.split(":")
+                mi[k] = int(v.split()[0])
+            L.append(f"Память: {(mi['MemTotal'] - mi['MemAvailable']) / 2**20:.1f} из {mi['MemTotal'] / 2**20:.1f} ГБ")
+        except (OSError, ValueError, KeyError):
+            pass
+        return L
 
 
 def camera_lines(d):
@@ -122,8 +211,8 @@ def camera_lines(d):
     enc = (d.slow.get("Simplify.Encode") or {}).get("MainFormat", {}).get("Video", {})
     L.append("# Поток")
     L.append("Камера: XM530 IPG-X4C-WER")
-    L.append("- Объективы: 2 (широкий + зум)")
-    L.append("Разрешение: 1920x2160 пикс.")
+    # 2026-09-15: строки «Объективы: 2 (широкий + зум)» и «Разрешение: 1920x2160 пикс.» убраны ради шрифта 1.3 —
+    # статичные, оба списка в base заполняют высоту впритык
     if enc:
         L.append(f"- Частота: {enc.get('FPS', '?')} к/с")
         L.append(f"Кодек: {enc.get('Compression', '?')}")
@@ -185,13 +274,11 @@ def frigate_lines(stats, ptz):
     if c:
         L.append(f"Захват: {c.get('camera_fps', '?')} к/с")
         L.append(f"- Детекция: {c.get('detection_fps', '?')} к/с")
-        L.append(f"- Пропущено: {c.get('skipped_fps', '?')} к/с")
+        # «Пропущено к/с», «Захват %», «Детект %» убраны 2026-09-15 ради шрифта 1.3 (см. выше про высоту)
         L.append("Связь: " + {"excellent": "отличная", "good": "хорошая", "fair": "средняя", "poor": "плохая"}.get(c.get("connection_quality"), str(c.get("connection_quality", "?"))))
         L.append(f"- Обрывов за час: {c.get('reconnects_last_hour', '?')}")
         L.append(f"- Задержек за час: {c.get('stalls_last_hour', '?')}")
         L.append(f"CPU записи: {c.get('ffmpeg_cpu', '?')} %")
-        L.append(f"- Захват: {c.get('capture_cpu', '?')} %")
-        L.append(f"- Детект: {c.get('detect_cpu', '?')} %")
     det = (stats or {}).get("detectors", {})
     for name, dv in det.items():
         L.append(f"Инференс ({name}): {dv.get('inference_speed', '?')} мс")
@@ -213,6 +300,7 @@ def main():
     parent = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 0
     os.makedirs(DIR, exist_ok=True)
     d = Dvrip()
+    hw = HwStats()
     n = 0
     prev_bytes = None
     prev_t = None
@@ -266,6 +354,13 @@ def main():
             light = f"{float(open(f'{DIR}/yavg.txt').read().split()[0]) / 255 * 100:.4f} %"
         except (OSError, ValueError, IndexError):
             pass
+        # звук камеры — RMS-уровень по astats из того же ffmpeg (audio.txt через FIFO, окно ~1 с)
+        sound = ""
+        try:
+            sound = f"{float(open(f'{DIR}/audio.txt').read().split()[0]):.1f} дБ"
+        except (OSError, ValueError, IndexError):
+            pass
+        hw.tick()
         if time.monotonic() - extra_t > 60:
             try:
                 extra = http(HA_EXTRA, timeout=4)
@@ -281,12 +376,14 @@ def main():
             L.append(f"К/с в оверлее: {fps}")
         if light:
             L.append(f"Освещённость: {light}")
+        if sound:
+            L.append(f"Звук: {sound}")
         L += camera_param_lines(d)
         L.append("[center]")
         L.append("# Сеть")
         L.append(f"Адрес LAN: {CAM_IP}")
         L.append("- Линк: Wi-Fi, сеть 77")
-        L.append("- MAC: 60:de:f4:1b:7b:2e")
+        # «MAC: 60:de:f4:1b:7b:2e» убран 2026-09-15 ради шрифта 1.3 (есть в device_credentials/vorota.txt)
         L.append(f"Отклик (TCP): {ping}")
         L.append("Путь: камера→go2rtc→ffmpeg")
         L.append("- Декод: программный (HEVC)")
@@ -301,6 +398,7 @@ def main():
             L.append(f"- Сборка: {si.get('BuildTime', '?')[:10]}")
             L.append(f"Серийный: {si.get('SerialNo', '?')}")
             L.append(f"Аудио: вход {si.get('AudioInChannel', 0)}, разг. {si.get('TalkOutChannel', 0)}")
+        L += hw.lines()
         L.append("[right]")
         if extra:
             L += [ln for ln in extra.split("\n") if ln and not ln.startswith("[")]
