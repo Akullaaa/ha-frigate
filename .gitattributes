@@ -12,3 +12,8 @@ vorota_vflip_vaapi.sh filter=git-crypt diff=git-crypt
 # старых именах — новые скрипты с паролями уходили в открытом виде; *.sh и xm_dvrip.py шифруются целиком
 *.sh filter=git-crypt diff=git-crypt
 xm_dvrip.py filter=git-crypt diff=git-crypt
+# 2026-09-17: пароли есть и в python-скриптах (MQTT у xonix_*, axis_2100_bridge) и в go2rtc_homekit.yml — шифруются целиком
+*.py filter=git-crypt diff=git-crypt
+*.yml filter=git-crypt diff=git-crypt
+# 2026-09-17: пароль логина tv в открытом go2rtc_tv.yaml
+*.yaml filter=git-crypt diff=git-crypt
