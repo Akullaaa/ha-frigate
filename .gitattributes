@@ -8,3 +8,7 @@ vbr_overlay_vaapi.sh filter=git-crypt diff=git-crypt
 vorota_raw_h264.sh filter=git-crypt diff=git-crypt
 vorota_vflip.sh filter=git-crypt diff=git-crypt
 vorota_vflip_vaapi.sh filter=git-crypt diff=git-crypt
+# 2026-09-17: после переименования камер (vorota→xm530, dvor→x2_wq_bl, spalnia→tuya_sp) шифрование осталось на
+# старых именах — новые скрипты с паролями уходили в открытом виде; *.sh и xm_dvrip.py шифруются целиком
+*.sh filter=git-crypt diff=git-crypt
+xm_dvrip.py filter=git-crypt diff=git-crypt
