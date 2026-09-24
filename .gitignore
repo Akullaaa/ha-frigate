@@ -29,3 +29,8 @@ frigate.db.bak*
 
 # ручные бэкапы конфига (пароли, не шифруются)
 config.yaml.*
+
+# 24.09: библиотеки EGL и pip-пакеты для порта Авроры (бинарные, перекачиваются)
+aurora/debs/
+aurora/sysroot/
+aurora/pylib/
