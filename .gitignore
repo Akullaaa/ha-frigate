@@ -34,3 +34,5 @@ config.yaml.*
 aurora/debs/
 aurora/sysroot/
 aurora/pylib/
+# 24.09: состояние кнопок Авроры (пишет aurora_ctl.py) — рабочие данные
+aurora/state_*.json
