@@ -26,3 +26,6 @@ backup_config.yaml
 logs/
 xm530_dvrip_pause
 frigate.db.bak*
+
+# ручные бэкапы конфига (пароли, не шифруются)
+config.yaml.*
