@@ -17,3 +17,7 @@ xm_dvrip.py filter=git-crypt diff=git-crypt
 *.yml filter=git-crypt diff=git-crypt
 # 2026-09-17: пароль логина tv в открытом go2rtc_tv.yaml
 *.yaml filter=git-crypt diff=git-crypt
+# 02.10: страховка на случай принудительного добавления — ручные бэкапы скриптов тоже шифруются
+# (имя вида cam_h264.sh.bak_20260929_setpts не совпадает с *.sh и уходило бы открытым текстом)
+*.bak_* filter=git-crypt diff=git-crypt
+*.try_* filter=git-crypt diff=git-crypt
