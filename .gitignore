@@ -43,3 +43,4 @@ aurora/state_*.json
 *.нукс*
 *.orig
 *.проба*
+*.до_*
